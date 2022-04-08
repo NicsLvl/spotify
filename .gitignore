@@ -1,5 +1,4 @@
 spotify_env/
 .vscode
-client_id
-client_secret
+client_id.py
 .DS_store
