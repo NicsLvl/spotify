@@ -1,4 +1,5 @@
-spotify_env/
-.vscode
 .env
 .DS_store
+spotify_env
+.vscode
+.cache
