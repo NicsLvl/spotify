@@ -1,0 +1,2535 @@
+---
+title: 'IS5126 Final Project'
+subtitle: "IS5126 Hands-on with Applied Analytics"
+author: "Team 1: Neal Wong, Nicholas Leong, Sean Xu Shunjie, Ong Yi Long, Nigel Ngan Zisheng"
+date: 'Due by: Apr 25, 2022 5:00 PM'
+output: 
+  html_document:
+    df_print: kable
+    highlight: tango
+    fig_width: 6
+    fig_height: 4
+    fig_caption: true
+linkcolor: MidnightBlue
+header-includes:
+- \usepackage{xcolor}
+---
+
+```{r load-libraries, echo=TRUE, message=FALSE, warning=FALSE}
+# load required packages
+library(dplyr)
+library(wooldridge)
+library(rcompanion)
+library(readxl)
+library(tidyr)
+library(ggplot2) 
+library(car)
+library(sandwich)
+library(lmtest)
+library(caret)
+library(pca3d)
+library(rms)
+library(leaps)
+library(psych)
+library(animation)
+library(factoextra)
+library(lubridate) 
+library(AER)    # applied econometrics with R
+library(plm)    # panel-lm
+library(stargazer)      # popular package for regression table-making
+library(lattice)
+library(stringr)
+```
+
+## Part A: Data preparation
+
+::: {style="color: red"}
+Dataset required: ***charts.csv***, ***charts_no_duplicate.csv*** and ***df.csv***
+:::
+
+In this section, we performed data preparation on data set with R. It is a necessary step before we can further proceed with our data analysis
+
+```{r data-input, echo=TRUE}
+rank = read.csv(file = 'charts.csv', header= TRUE)
+rank_no_dup = read.csv(file = 'charts_no_duplicate.csv', header= TRUE)
+music_style =  read.csv(file = 'df.csv', header= TRUE)
+```
+
+Summary & Structure of the data set
+
+```{r summary, echo=TRUE}
+summary(rank)
+summary(rank_no_dup)
+summary(music_style)
+
+```
+
+```{r structure, echo=TRUE}
+# display the structure of an object in R.
+
+#'rank' is a dataframe with 330087 obs and and 7 variables.
+str(rank)
+
+#'rank_no_dup'is a dataframe with 9197 obs
+str(rank_no_dup)
+
+#'music_style'is a dataframe with 9197 obs
+str(music_style)
+
+
+```
+
+Merging of main_df
+
+```{r data_merge, echo=TRUE}
+#colnames(music_style)[1]<- "song"
+#Using "song" and "artist" as key for rank dataframe join
+main_df_rank <- full_join(rank, rank_no_dup ,by=c("song","artist"))
+
+#Convert char to date
+main_df_rank$date <- as.Date(main_df_rank$date, format = "%d/%m/%y")
+
+#Handle incorrect dates due to 2004 and 2008 POSIX standards. e.g. 1968 become 2068
+main_df_rank$date <- as.Date(ifelse(main_df_rank$date > Sys.Date(), format(main_df_rank$date, "%d/%m/19%y"), format(main_df_rank$date)))
+
+#Rearrange dataframe according to date and filter for songs only after year 2000
+main_df_rank <- main_df_rank %>% 
+  arrange(desc(main_df_rank$date),main_df_rank$rank) %>% 
+  filter(main_df_rank$date >= "2000-01-01")
+
+main_df_rank <- distinct(main_df_rank)
+
+
+########### df.csv need to update, first colunm is 'song', removed by code#####
+music_style = subset(music_style, select = -c (X))
+
+#Convert char to date
+music_style$release_date <- as.Date(music_style$release_date, format = "%d/%m/%y")
+
+#Handle incorrect dates due to 2004 and 2008 POSIX standards. e.g. 1968 become 2068
+music_style$release_date <- as.Date(ifelse(music_style$release_date > Sys.Date(), format(music_style$release_date, "%d/%m/19%y"), format(music_style$release_date)))
+
+
+#Using "id" as key for dataframe join between rank and music_stytle
+main_df <- full_join(main_df_rank, music_style,by=c('id'))
+
+```
+
+Manipulate main_df to get required data set for analysis
+
+```{r data_manu, echo=TRUE}
+
+main_df <- main_df %>% 
+                mutate(loudness_sqr = loudness^2 )%>%
+                mutate(length_sec = length/(10^3))%>%
+                mutate(ever_on_billboard = case_when (is.na(last.week) ~ 0,is.numeric(last.week) ~ 1, TRUE ~ 1))%>%
+                mutate(min_8weeks = case_when (weeks.on.board > 8 ~ 1, weeks.on.board <= 8 ~ 0, TRUE ~ 1))
+
+#mutate control variable hit_song, ever on bill board and more than 8 weeks will consider a song as hit song
+main_df <- main_df %>%
+        mutate(hit_song = case_when(ever_on_billboard ==1 & min_8weeks == 1 ~1, ever_on_billboard ==0 & min_8weeks == 1 ~0, ever_on_billboard ==1 & min_8weeks == 0 ~0, ever_on_billboard ==0 & min_8weeks == 0 ~0,TRUE ~ 1))
+
+#select relevent music stytle colunm 
+main_df_selected <- main_df %>% 
+                    select(date, rank, id, length, length_sec,popularity, danceability, acousticness,energy, instrumentalness, liveness, loudness, loudness_sqr, speechiness, tempo, time_signature,ever_on_billboard, min_8weeks, hit_song)
+
+
+#To get highest rank for unique song
+main_df_bestRank <- main_df_selected %>%
+                  group_by(id) %>%
+                  mutate(best_rank = min(c_across(starts_with("rank")), 
+                  na.rm = TRUE))%>%
+                  slice(which.min(best_rank))
+
+#To get mean rank for unique song
+main_df_meanRank <- main_df_selected %>%
+                  group_by(id) %>%
+                  mutate(mean_rank = mean(c_across(starts_with("rank")), 
+                   na.rm = TRUE))%>%
+                  slice(which.min(mean_rank))
+
+
+#Consolidated df with bestrank and mean rank for unique song
+main_df_rankInfo <- main_df_selected %>%
+                  group_by(id) %>%
+                  mutate(best_rank = min(c_across(starts_with("rank")), 
+                  na.rm = TRUE))%>%
+                  mutate(mean_rank = mean(c_across(starts_with("rank")), 
+                  na.rm = TRUE))%>%
+                  slice(which.min(best_rank))%>%
+                  slice(which.min(mean_rank))
+
+#Year of interest: 2008, 2019 and 2020
+main_df_selected_08 = main_df_selected %>%
+                      filter(main_df_selected$date >= "2008-01-01", main_df_selected$date <= "2008-12-31" )
+
+main_df_selected_19 = main_df_selected %>%
+                      filter(main_df_selected$date >= "2019-01-01", main_df_selected$date <= "2019-12-31" )
+
+main_df_selected_20 = main_df_selected %>%
+                      filter(main_df_selected$date >= "2020-01-01", main_df_selected$date <= "2020-12-31" )
+
+
+main_df_hit_song = main_df_selected %>%
+                      filter(main_df_selected$hit_song == 1 )
+
+# To get the hit_song for rank
+main_df_hit_song_rank <- main_df_rankInfo %>%
+                        subset(main_df_rankInfo$hit_song>0)
+
+
+is.pbalanced(main_df)
+is.pbalanced(main_df_rankInfo)
+is.pbalanced(main_df_selected)  
+```
+
+## Part B: Descriptive Analytics
+
+```{r}
+plot(main_df_hit_song_rank$length_sec,main_df_hit_song_rank$popularity)
+
+plot(main_df_hit_song_rank$danceability,main_df_hit_song_rank$popularity)
+
+plot(main_df_hit_song_rank$acousticness,main_df_hit_song_rank$popularity)
+
+plot(main_df_hit_song_rank$energy,main_df_hit_song_rank$popularity)
+
+plot(main_df_hit_song_rank$instrumentalness,main_df_hit_song_rank$popularity)
+
+plot(main_df_hit_song_rank$liveness,main_df_hit_song_rank$popularity)
+
+plot(main_df_hit_song_rank$loudness_sqr,main_df_hit_song_rank$popularity)
+
+plot(main_df_hit_song_rank$speechiness,main_df_hit_song_rank$popularity)
+
+plot(main_df_hit_song_rank$tempo,main_df_hit_song_rank$popularity)
+
+plot(main_df_hit_song_rank$time_signature,main_df_hit_song_rank$popularity)
+
+```
+
+```{r}
+plot(main_df_hit_song_rank$length_sec,main_df_hit_song_rank$mean_rank)
+
+plot(main_df_hit_song_rank$danceability,main_df_hit_song_rank$mean_rank)
+
+plot(main_df_hit_song_rank$acousticness,main_df_hit_song_rank$mean_rank)
+
+plot(main_df_hit_song_rank$energy,main_df_hit_song_rank$mean_rank)
+
+plot(main_df_hit_song_rank$instrumentalness,main_df_hit_song_rank$mean_rank)
+
+plot(main_df_hit_song_rank$liveness,main_df_hit_song_rank$mean_rank)
+
+plot(main_df_hit_song_rank$loudness_sqr,main_df_hit_song_rank$mean_rank)
+
+plot(main_df_hit_song_rank$speechiness,main_df_hit_song_rank$mean_rank)
+
+plot(main_df_hit_song_rank$tempo,main_df_hit_song_rank$mean_rank)
+
+plot(main_df_hit_song_rank$time_signature,main_df_hit_song_rank$mean_rank)
+
+```
+
+
+```{r}
+p <- ggplot(main_df_hit_song_rank, aes(x=danceability)) + 
+  geom_density()
+
+p
+p+ geom_vline(aes(xintercept=mean(danceability)),
+            color="blue", linetype="dashed", size=1)
+
+
+
+```
+
+Get Mean of Attributes for each Year
+
+```{r mean_attr_year, echo=TRUE}
+#get attribute of mean for each year
+attri_by_yr <- main_df %>%
+  mutate(year = as.numeric(format(date, "%Y"))) %>%
+  select(year,length_sec,popularity, danceability, acousticness,energy, instrumentalness, liveness, loudness_sqr, speechiness, tempo, time_signature) %>%
+  na.omit(attri_by_yr) %>%
+  group_by(year) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+```
+
+Get Mean of Attributes for each Year
+
+```{r mean_attr_plot, echo=TRUE}
+
+plot(attri_by_yr$year,attri_by_yr$`mean(length_sec)`, xlab ="Year" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_by_yr$`mean(length_sec)` ~ attri_by_yr$year))
+
+plot(attri_by_yr$year,attri_by_yr$`mean(popularity)`, xlab ="Year",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_by_yr$`mean(popularity)` ~ attri_by_yr$year))
+
+plot(attri_by_yr$year,attri_by_yr$`mean(danceability)`, xlab ="Year",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_by_yr$`mean(danceability)` ~ attri_by_yr$year))
+
+plot(attri_by_yr$year,attri_by_yr$`mean(acousticness)`, xlab ="Year",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_by_yr$`mean(acousticness)` ~ attri_by_yr$year))
+
+plot(attri_by_yr$year,attri_by_yr$`mean(energy)`, xlab ="Year",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_by_yr$`mean(energy)` ~ attri_by_yr$year))
+
+plot(attri_by_yr$year,attri_by_yr$`mean(instrumentalness)`, xlab ="Year",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_by_yr$`mean(instrumentalness)` ~ attri_by_yr$year))
+
+plot(attri_by_yr$year,attri_by_yr$`mean(liveness)`, xlab ="Year",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_by_yr$`mean(liveness)` ~ attri_by_yr$year))
+
+plot(attri_by_yr$year,attri_by_yr$`mean(loudness_sqr)`, xlab ="Year",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_by_yr$`mean(loudness_sqr)` ~ attri_by_yr$year))
+
+plot(attri_by_yr$year,attri_by_yr$`mean(speechiness)`, xlab ="Year",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_by_yr$`mean(speechiness)` ~ attri_by_yr$year))
+
+plot(attri_by_yr$year,attri_by_yr$`mean(tempo)`, xlab ="Year",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_by_yr$`mean(tempo)` ~ attri_by_yr$year))
+
+plot(attri_by_yr$year,attri_by_yr$`mean(time_signature)`, xlab ="Year",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_by_yr$`mean(time_signature)` ~ attri_by_yr$year))
+
+```
+
+```{r mean_attr, echo=TRUE}
+#get attribute of mean for each month and year
+attri_by_mth <- main_df %>%
+  mutate(yearmth = format(date, "%Y%m"), year = as.numeric(format(date, "%Y")), month = as.numeric(format(date, "%m"))) %>%
+  select(year,month, yearmth,length_sec,popularity, danceability, acousticness,energy, instrumentalness, liveness, loudness_sqr, speechiness, tempo, time_signature) %>%
+  na.omit(attri_by_mth)
+
+attri_2000 <- attri_by_mth %>%
+  filter( year == 2000)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2001 <- attri_by_mth %>%
+  filter( year == 2001)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2002 <- attri_by_mth %>%
+  filter( year == 2002)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2003 <- attri_by_mth %>%
+  filter( year == 2003)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2004 <- attri_by_mth %>%
+  filter( year == 2004)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2005 <- attri_by_mth %>%
+  filter( year == 2005)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2006 <- attri_by_mth %>%
+  filter( year == 2006)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2007 <- attri_by_mth %>%
+  filter( year == 2007)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2008 <- attri_by_mth %>%
+  filter( year == 2008)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2009 <- attri_by_mth %>%
+  filter( year == 2009)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+attri_2010 <- attri_by_mth %>%
+  filter( year == 2010)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2011 <- attri_by_mth %>%
+  filter( year == 2011)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2012 <- attri_by_mth %>%
+  filter( year == 2012)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2013 <- attri_by_mth %>%
+  filter( year == 2013)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2014 <- attri_by_mth %>%
+  filter( year == 2014)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2015 <- attri_by_mth %>%
+  filter( year == 2015)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2016 <- attri_by_mth %>%
+  filter( year == 2016)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2017 <- attri_by_mth %>%
+  filter( year == 2017)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2018 <- attri_by_mth %>%
+  filter( year == 2018)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2019 <- attri_by_mth %>%
+  filter( year == 2019)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2020 <- attri_by_mth %>%
+  filter( year == 2020)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+attri_2021 <- attri_by_mth %>%
+  filter( year == 2021)  %>%
+  group_by(yearmth) %>%
+    summarise(mean(length_sec),mean(popularity),mean(danceability),mean(acousticness),mean(energy), mean(instrumentalness), mean(liveness), mean(loudness_sqr), mean(speechiness), mean(tempo), mean(time_signature))
+
+
+```
+
+
+Get mean of Attributes for Year 2000
+
+```{r mean_attr_plot_2000, echo=TRUE}
+
+plot(attri_2000$yearmth,attri_2000$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2000$`mean(length_sec)` ~ attri_2000$yearmth))
+
+plot(attri_2000$yearmth,attri_2000$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2000$`mean(popularity)` ~ attri_2000$yearmth))
+
+plot(attri_2000$yearmth,attri_2000$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2000$`mean(danceability)` ~ attri_2000$yearmth))
+
+plot(attri_2000$yearmth,attri_2000$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2000$`mean(acousticness)` ~ attri_2000$yearmth))
+
+plot(attri_2000$yearmth,attri_2000$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2000$`mean(energy)` ~ attri_2000$yearmth))
+
+plot(attri_2000$yearmth,attri_2000$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2000$`mean(instrumentalness)` ~ attri_2000$yearmth))
+
+plot(attri_2000$yearmth,attri_2000$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2000$`mean(liveness)` ~ attri_2000$yearmth))
+
+plot(attri_2000$yearmth,attri_2000$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2000$`mean(loudness_sqr)` ~ attri_2000$yearmth))
+
+plot(attri_2000$yearmth,attri_2000$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2000$`mean(speechiness)` ~ attri_2000$yearmth))
+
+plot(attri_2000$yearmth,attri_2000$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2000$`mean(tempo)` ~ attri_2000$yearmth))
+
+plot(attri_2000$yearmth,attri_2000$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2000$`mean(time_signature)` ~ attri_2000$yearmth))
+
+```
+
+Get mean of Attributes for Year 2001
+
+```{r mean_attr_plot_2001, echo=TRUE}
+
+plot(attri_2001$yearmth,attri_2001$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2001$`mean(length_sec)` ~ attri_2001$yearmth))
+
+plot(attri_2001$yearmth,attri_2001$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2001$`mean(popularity)` ~ attri_2001$yearmth))
+
+plot(attri_2001$yearmth,attri_2001$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2001$`mean(danceability)` ~ attri_2001$yearmth))
+
+plot(attri_2001$yearmth,attri_2001$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2001$`mean(acousticness)` ~ attri_2001$yearmth))
+
+plot(attri_2001$yearmth,attri_2001$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2001$`mean(energy)` ~ attri_2001$yearmth))
+
+plot(attri_2001$yearmth,attri_2001$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2001$`mean(instrumentalness)` ~ attri_2001$yearmth))
+
+plot(attri_2001$yearmth,attri_2001$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2001$`mean(liveness)` ~ attri_2001$yearmth))
+
+plot(attri_2001$yearmth,attri_2001$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2001$`mean(loudness_sqr)` ~ attri_2001$yearmth))
+
+plot(attri_2001$yearmth,attri_2001$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2001$`mean(speechiness)` ~ attri_2001$yearmth))
+
+plot(attri_2001$yearmth,attri_2001$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2001$`mean(tempo)` ~ attri_2001$yearmth))
+
+plot(attri_2001$yearmth,attri_2001$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2001$`mean(time_signature)` ~ attri_2001$yearmth))
+
+```
+
+
+Get mean of Attributes for Year 2002
+
+```{r mean_attr_plot_2002, echo=TRUE}
+
+plot(attri_2002$yearmth,attri_2002$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2002$`mean(length_sec)` ~ attri_2002$yearmth))
+
+plot(attri_2002$yearmth,attri_2002$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2002$`mean(popularity)` ~ attri_2002$yearmth))
+
+plot(attri_2002$yearmth,attri_2002$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2002$`mean(danceability)` ~ attri_2002$yearmth))
+
+plot(attri_2002$yearmth,attri_2002$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2002$`mean(acousticness)` ~ attri_2002$yearmth))
+
+plot(attri_2002$yearmth,attri_2002$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2002$`mean(energy)` ~ attri_2002$yearmth))
+
+plot(attri_2002$yearmth,attri_2002$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2002$`mean(instrumentalness)` ~ attri_2002$yearmth))
+
+plot(attri_2002$yearmth,attri_2002$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2002$`mean(liveness)` ~ attri_2002$yearmth))
+
+plot(attri_2002$yearmth,attri_2002$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2002$`mean(loudness_sqr)` ~ attri_2002$yearmth))
+
+plot(attri_2002$yearmth,attri_2002$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2002$`mean(speechiness)` ~ attri_2002$yearmth))
+
+plot(attri_2002$yearmth,attri_2002$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2002$`mean(tempo)` ~ attri_2002$yearmth))
+
+plot(attri_2002$yearmth,attri_2002$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2002$`mean(time_signature)` ~ attri_2002$yearmth))
+
+```
+
+Get mean of Attributes for Year 2003
+
+```{r mean_attr_plot_2003, echo=TRUE}
+
+plot(attri_2003$yearmth,attri_2003$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2003$`mean(length_sec)` ~ attri_2003$yearmth))
+
+plot(attri_2003$yearmth,attri_2003$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2003$`mean(popularity)` ~ attri_2003$yearmth))
+
+plot(attri_2003$yearmth,attri_2003$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2003$`mean(danceability)` ~ attri_2003$yearmth))
+
+plot(attri_2003$yearmth,attri_2003$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2003$`mean(acousticness)` ~ attri_2003$yearmth))
+
+plot(attri_2003$yearmth,attri_2003$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2003$`mean(energy)` ~ attri_2003$yearmth))
+
+plot(attri_2003$yearmth,attri_2003$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2003$`mean(instrumentalness)` ~ attri_2003$yearmth))
+
+plot(attri_2003$yearmth,attri_2003$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2003$`mean(liveness)` ~ attri_2003$yearmth))
+
+plot(attri_2003$yearmth,attri_2003$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2003$`mean(loudness_sqr)` ~ attri_2003$yearmth))
+
+plot(attri_2003$yearmth,attri_2003$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2003$`mean(speechiness)` ~ attri_2003$yearmth))
+
+plot(attri_2003$yearmth,attri_2003$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2003$`mean(tempo)` ~ attri_2003$yearmth))
+
+plot(attri_2003$yearmth,attri_2003$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2003$`mean(time_signature)` ~ attri_2003$yearmth))
+
+```
+
+Get mean of Attributes for Year 2004
+
+```{r mean_attr_plot_2004, echo=TRUE}
+
+plot(attri_2004$yearmth,attri_2004$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2004$`mean(length_sec)` ~ attri_2004$yearmth))
+
+plot(attri_2004$yearmth,attri_2004$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2004$`mean(popularity)` ~ attri_2004$yearmth))
+
+plot(attri_2004$yearmth,attri_2004$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2004$`mean(danceability)` ~ attri_2004$yearmth))
+
+plot(attri_2004$yearmth,attri_2004$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2004$`mean(acousticness)` ~ attri_2004$yearmth))
+
+plot(attri_2004$yearmth,attri_2004$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2004$`mean(energy)` ~ attri_2004$yearmth))
+
+plot(attri_2004$yearmth,attri_2004$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2004$`mean(instrumentalness)` ~ attri_2004$yearmth))
+
+plot(attri_2004$yearmth,attri_2004$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2004$`mean(liveness)` ~ attri_2004$yearmth))
+
+plot(attri_2004$yearmth,attri_2004$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2004$`mean(loudness_sqr)` ~ attri_2004$yearmth))
+
+plot(attri_2004$yearmth,attri_2004$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2004$`mean(speechiness)` ~ attri_2004$yearmth))
+
+plot(attri_2004$yearmth,attri_2004$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2004$`mean(tempo)` ~ attri_2004$yearmth))
+
+plot(attri_2004$yearmth,attri_2004$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2004$`mean(time_signature)` ~ attri_2004$yearmth))
+
+```
+
+Get mean of Attributes for Year 2005
+
+```{r mean_attr_plot_2005, echo=TRUE}
+
+plot(attri_2005$yearmth,attri_2005$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2005$`mean(length_sec)` ~ attri_2005$yearmth))
+
+plot(attri_2005$yearmth,attri_2005$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2005$`mean(popularity)` ~ attri_2005$yearmth))
+
+plot(attri_2005$yearmth,attri_2005$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2005$`mean(danceability)` ~ attri_2005$yearmth))
+
+plot(attri_2005$yearmth,attri_2005$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2005$`mean(acousticness)` ~ attri_2005$yearmth))
+
+plot(attri_2005$yearmth,attri_2005$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2005$`mean(energy)` ~ attri_2005$yearmth))
+
+plot(attri_2005$yearmth,attri_2005$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2005$`mean(instrumentalness)` ~ attri_2005$yearmth))
+
+plot(attri_2005$yearmth,attri_2005$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2005$`mean(liveness)` ~ attri_2005$yearmth))
+
+plot(attri_2005$yearmth,attri_2005$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2005$`mean(loudness_sqr)` ~ attri_2005$yearmth))
+
+plot(attri_2005$yearmth,attri_2005$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2005$`mean(speechiness)` ~ attri_2005$yearmth))
+
+plot(attri_2005$yearmth,attri_2005$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2005$`mean(tempo)` ~ attri_2005$yearmth))
+
+plot(attri_2005$yearmth,attri_2005$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2005$`mean(time_signature)` ~ attri_2005$yearmth))
+
+```
+
+Get mean of Attributes for Year 2006
+
+```{r mean_attr_plot_2006, echo=TRUE}
+
+plot(attri_2006$yearmth,attri_2006$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2006$`mean(length_sec)` ~ attri_2006$yearmth))
+
+plot(attri_2006$yearmth,attri_2006$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2006$`mean(popularity)` ~ attri_2006$yearmth))
+
+plot(attri_2006$yearmth,attri_2006$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2006$`mean(danceability)` ~ attri_2006$yearmth))
+
+plot(attri_2006$yearmth,attri_2006$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2006$`mean(acousticness)` ~ attri_2006$yearmth))
+
+plot(attri_2006$yearmth,attri_2006$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2006$`mean(energy)` ~ attri_2006$yearmth))
+
+plot(attri_2006$yearmth,attri_2006$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2006$`mean(instrumentalness)` ~ attri_2006$yearmth))
+
+plot(attri_2006$yearmth,attri_2006$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2006$`mean(liveness)` ~ attri_2006$yearmth))
+
+plot(attri_2006$yearmth,attri_2006$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2006$`mean(loudness_sqr)` ~ attri_2006$yearmth))
+
+plot(attri_2006$yearmth,attri_2006$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2006$`mean(speechiness)` ~ attri_2006$yearmth))
+
+plot(attri_2006$yearmth,attri_2006$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2006$`mean(tempo)` ~ attri_2006$yearmth))
+
+plot(attri_2006$yearmth,attri_2006$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2006$`mean(time_signature)` ~ attri_2006$yearmth))
+
+```
+
+Get mean of Attributes for Year 2007
+
+```{r mean_attr_plot_2007, echo=TRUE}
+
+plot(attri_2007$yearmth,attri_2007$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2007$`mean(length_sec)` ~ attri_2007$yearmth))
+
+plot(attri_2007$yearmth,attri_2007$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2007$`mean(popularity)` ~ attri_2007$yearmth))
+
+plot(attri_2007$yearmth,attri_2007$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2007$`mean(danceability)` ~ attri_2007$yearmth))
+
+plot(attri_2007$yearmth,attri_2007$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2007$`mean(acousticness)` ~ attri_2007$yearmth))
+
+plot(attri_2007$yearmth,attri_2007$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2007$`mean(energy)` ~ attri_2007$yearmth))
+
+plot(attri_2007$yearmth,attri_2007$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2007$`mean(instrumentalness)` ~ attri_2007$yearmth))
+
+plot(attri_2007$yearmth,attri_2007$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2007$`mean(liveness)` ~ attri_2007$yearmth))
+
+plot(attri_2007$yearmth,attri_2007$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2007$`mean(loudness_sqr)` ~ attri_2007$yearmth))
+
+plot(attri_2007$yearmth,attri_2007$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2007$`mean(speechiness)` ~ attri_2007$yearmth))
+
+plot(attri_2007$yearmth,attri_2007$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2007$`mean(tempo)` ~ attri_2007$yearmth))
+
+plot(attri_2007$yearmth,attri_2007$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2007$`mean(time_signature)` ~ attri_2007$yearmth))
+
+```
+
+Get mean of Attributes for Year 2008
+
+```{r mean_attr_plot_2008, echo=TRUE}
+
+plot(attri_2008$yearmth,attri_2008$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2008$`mean(length_sec)` ~ attri_2008$yearmth))
+
+plot(attri_2008$yearmth,attri_2008$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2008$`mean(popularity)` ~ attri_2008$yearmth))
+
+plot(attri_2008$yearmth,attri_2008$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2008$`mean(danceability)` ~ attri_2008$yearmth))
+
+plot(attri_2008$yearmth,attri_2008$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2008$`mean(acousticness)` ~ attri_2008$yearmth))
+
+plot(attri_2008$yearmth,attri_2008$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2008$`mean(energy)` ~ attri_2008$yearmth))
+
+plot(attri_2008$yearmth,attri_2008$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2008$`mean(instrumentalness)` ~ attri_2008$yearmth))
+
+plot(attri_2008$yearmth,attri_2008$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2008$`mean(liveness)` ~ attri_2008$yearmth))
+
+plot(attri_2008$yearmth,attri_2008$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2008$`mean(loudness_sqr)` ~ attri_2008$yearmth))
+
+plot(attri_2008$yearmth,attri_2008$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2008$`mean(speechiness)` ~ attri_2008$yearmth))
+
+plot(attri_2008$yearmth,attri_2008$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2008$`mean(tempo)` ~ attri_2008$yearmth))
+
+plot(attri_2008$yearmth,attri_2008$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2008$`mean(time_signature)` ~ attri_2008$yearmth))
+
+```
+
+Get mean of Attributes for Year 2009
+
+```{r mean_attr_plot_2009, echo=TRUE}
+
+plot(attri_2009$yearmth,attri_2009$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2009$`mean(length_sec)` ~ attri_2009$yearmth))
+
+plot(attri_2009$yearmth,attri_2009$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2009$`mean(popularity)` ~ attri_2009$yearmth))
+
+plot(attri_2009$yearmth,attri_2009$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2009$`mean(danceability)` ~ attri_2009$yearmth))
+
+plot(attri_2009$yearmth,attri_2009$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2009$`mean(acousticness)` ~ attri_2009$yearmth))
+
+plot(attri_2009$yearmth,attri_2009$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2009$`mean(energy)` ~ attri_2009$yearmth))
+
+plot(attri_2009$yearmth,attri_2009$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2009$`mean(instrumentalness)` ~ attri_2009$yearmth))
+
+plot(attri_2009$yearmth,attri_2009$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2009$`mean(liveness)` ~ attri_2009$yearmth))
+
+plot(attri_2009$yearmth,attri_2009$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2009$`mean(loudness_sqr)` ~ attri_2009$yearmth))
+
+plot(attri_2009$yearmth,attri_2009$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2009$`mean(speechiness)` ~ attri_2009$yearmth))
+
+plot(attri_2009$yearmth,attri_2009$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2009$`mean(tempo)` ~ attri_2009$yearmth))
+
+plot(attri_2009$yearmth,attri_2009$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2009$`mean(time_signature)` ~ attri_2009$yearmth))
+
+```
+
+Get mean of Attributes for Year 2010
+
+```{r mean_attr_plot_2010, echo=TRUE}
+
+plot(attri_2010$yearmth,attri_2010$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2010$`mean(length_sec)` ~ attri_2010$yearmth))
+
+plot(attri_2010$yearmth,attri_2010$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2010$`mean(popularity)` ~ attri_2010$yearmth))
+
+plot(attri_2010$yearmth,attri_2010$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2010$`mean(danceability)` ~ attri_2010$yearmth))
+
+plot(attri_2010$yearmth,attri_2010$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2010$`mean(acousticness)` ~ attri_2010$yearmth))
+
+plot(attri_2010$yearmth,attri_2010$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2010$`mean(energy)` ~ attri_2010$yearmth))
+
+plot(attri_2010$yearmth,attri_2010$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2010$`mean(instrumentalness)` ~ attri_2010$yearmth))
+
+plot(attri_2010$yearmth,attri_2010$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2010$`mean(liveness)` ~ attri_2010$yearmth))
+
+plot(attri_2010$yearmth,attri_2010$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2010$`mean(loudness_sqr)` ~ attri_2010$yearmth))
+
+plot(attri_2010$yearmth,attri_2010$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2010$`mean(speechiness)` ~ attri_2010$yearmth))
+
+plot(attri_2010$yearmth,attri_2010$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2010$`mean(tempo)` ~ attri_2010$yearmth))
+
+plot(attri_2010$yearmth,attri_2010$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2010$`mean(time_signature)` ~ attri_2010$yearmth))
+
+```
+
+Get mean of Attributes for Year 2011
+
+```{r mean_attr_plot_2011, echo=TRUE}
+
+plot(attri_2011$yearmth,attri_2011$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2011$`mean(length_sec)` ~ attri_2011$yearmth))
+
+plot(attri_2011$yearmth,attri_2011$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2011$`mean(popularity)` ~ attri_2011$yearmth))
+
+plot(attri_2011$yearmth,attri_2011$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2011$`mean(danceability)` ~ attri_2011$yearmth))
+
+plot(attri_2011$yearmth,attri_2011$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2011$`mean(acousticness)` ~ attri_2011$yearmth))
+
+plot(attri_2011$yearmth,attri_2011$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2011$`mean(energy)` ~ attri_2011$yearmth))
+
+plot(attri_2011$yearmth,attri_2011$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2011$`mean(instrumentalness)` ~ attri_2011$yearmth))
+
+plot(attri_2011$yearmth,attri_2011$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2011$`mean(liveness)` ~ attri_2011$yearmth))
+
+plot(attri_2011$yearmth,attri_2011$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2011$`mean(loudness_sqr)` ~ attri_2011$yearmth))
+
+plot(attri_2011$yearmth,attri_2011$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2011$`mean(speechiness)` ~ attri_2011$yearmth))
+
+plot(attri_2011$yearmth,attri_2011$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2011$`mean(tempo)` ~ attri_2011$yearmth))
+
+plot(attri_2011$yearmth,attri_2011$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2011$`mean(time_signature)` ~ attri_2011$yearmth))
+
+```
+
+Get mean of Attributes for Year 2012
+
+```{r mean_attr_plot_2012, echo=TRUE}
+
+plot(attri_2012$yearmth,attri_2012$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2012$`mean(length_sec)` ~ attri_2012$yearmth))
+
+plot(attri_2012$yearmth,attri_2012$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2012$`mean(popularity)` ~ attri_2012$yearmth))
+
+plot(attri_2012$yearmth,attri_2012$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2012$`mean(danceability)` ~ attri_2012$yearmth))
+
+plot(attri_2012$yearmth,attri_2012$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2012$`mean(acousticness)` ~ attri_2012$yearmth))
+
+plot(attri_2012$yearmth,attri_2012$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2012$`mean(energy)` ~ attri_2012$yearmth))
+
+plot(attri_2012$yearmth,attri_2012$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2012$`mean(instrumentalness)` ~ attri_2012$yearmth))
+
+plot(attri_2012$yearmth,attri_2012$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2012$`mean(liveness)` ~ attri_2012$yearmth))
+
+plot(attri_2012$yearmth,attri_2012$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2012$`mean(loudness_sqr)` ~ attri_2012$yearmth))
+
+plot(attri_2012$yearmth,attri_2012$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2012$`mean(speechiness)` ~ attri_2012$yearmth))
+
+plot(attri_2012$yearmth,attri_2012$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2012$`mean(tempo)` ~ attri_2012$yearmth))
+
+plot(attri_2012$yearmth,attri_2012$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2012$`mean(time_signature)` ~ attri_2012$yearmth))
+
+```
+
+Get mean of Attributes for Year 2013
+
+```{r mean_attr_plot_2013, echo=TRUE}
+
+plot(attri_2013$yearmth,attri_2013$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2013$`mean(length_sec)` ~ attri_2013$yearmth))
+
+plot(attri_2013$yearmth,attri_2013$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2013$`mean(popularity)` ~ attri_2013$yearmth))
+
+plot(attri_2013$yearmth,attri_2013$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2013$`mean(danceability)` ~ attri_2013$yearmth))
+
+plot(attri_2013$yearmth,attri_2013$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2013$`mean(acousticness)` ~ attri_2013$yearmth))
+
+plot(attri_2013$yearmth,attri_2013$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2013$`mean(energy)` ~ attri_2013$yearmth))
+
+plot(attri_2013$yearmth,attri_2013$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2013$`mean(instrumentalness)` ~ attri_2013$yearmth))
+
+plot(attri_2013$yearmth,attri_2013$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2013$`mean(liveness)` ~ attri_2013$yearmth))
+
+plot(attri_2013$yearmth,attri_2013$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2013$`mean(loudness_sqr)` ~ attri_2013$yearmth))
+
+plot(attri_2013$yearmth,attri_2013$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2013$`mean(speechiness)` ~ attri_2013$yearmth))
+
+plot(attri_2013$yearmth,attri_2013$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2013$`mean(tempo)` ~ attri_2013$yearmth))
+
+plot(attri_2013$yearmth,attri_2013$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2013$`mean(time_signature)` ~ attri_2013$yearmth))
+
+```
+
+Get mean of Attributes for Year 2014
+
+```{r mean_attr_plot_2014, echo=TRUE}
+
+plot(attri_2014$yearmth,attri_2014$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2014$`mean(length_sec)` ~ attri_2014$yearmth))
+
+plot(attri_2014$yearmth,attri_2014$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2014$`mean(popularity)` ~ attri_2014$yearmth))
+
+plot(attri_2014$yearmth,attri_2014$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2014$`mean(danceability)` ~ attri_2014$yearmth))
+
+plot(attri_2014$yearmth,attri_2014$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2014$`mean(acousticness)` ~ attri_2014$yearmth))
+
+plot(attri_2014$yearmth,attri_2014$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2014$`mean(energy)` ~ attri_2014$yearmth))
+
+plot(attri_2014$yearmth,attri_2014$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2014$`mean(instrumentalness)` ~ attri_2014$yearmth))
+
+plot(attri_2014$yearmth,attri_2014$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2014$`mean(liveness)` ~ attri_2014$yearmth))
+
+plot(attri_2014$yearmth,attri_2014$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2014$`mean(loudness_sqr)` ~ attri_2014$yearmth))
+
+plot(attri_2014$yearmth,attri_2014$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2014$`mean(speechiness)` ~ attri_2014$yearmth))
+
+plot(attri_2014$yearmth,attri_2014$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2014$`mean(tempo)` ~ attri_2014$yearmth))
+
+plot(attri_2014$yearmth,attri_2014$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2014$`mean(time_signature)` ~ attri_2014$yearmth))
+
+```
+
+Get mean of Attributes for Year 2015
+
+```{r mean_attr_plot_2015, echo=TRUE}
+
+plot(attri_2015$yearmth,attri_2015$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2015$`mean(length_sec)` ~ attri_2015$yearmth))
+
+plot(attri_2015$yearmth,attri_2015$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2015$`mean(popularity)` ~ attri_2015$yearmth))
+
+plot(attri_2015$yearmth,attri_2015$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2015$`mean(danceability)` ~ attri_2015$yearmth))
+
+plot(attri_2015$yearmth,attri_2015$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2015$`mean(acousticness)` ~ attri_2015$yearmth))
+
+plot(attri_2015$yearmth,attri_2015$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2015$`mean(energy)` ~ attri_2015$yearmth))
+
+plot(attri_2015$yearmth,attri_2015$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2015$`mean(instrumentalness)` ~ attri_2015$yearmth))
+
+plot(attri_2015$yearmth,attri_2015$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2015$`mean(liveness)` ~ attri_2015$yearmth))
+
+plot(attri_2015$yearmth,attri_2015$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2015$`mean(loudness_sqr)` ~ attri_2015$yearmth))
+
+plot(attri_2015$yearmth,attri_2015$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2015$`mean(speechiness)` ~ attri_2015$yearmth))
+
+plot(attri_2015$yearmth,attri_2015$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2015$`mean(tempo)` ~ attri_2015$yearmth))
+
+plot(attri_2015$yearmth,attri_2015$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2015$`mean(time_signature)` ~ attri_2015$yearmth))
+
+```
+
+Get mean of Attributes for Year 2016
+
+```{r mean_attr_plot_2016, echo=TRUE}
+
+plot(attri_2016$yearmth,attri_2016$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2016$`mean(length_sec)` ~ attri_2016$yearmth))
+
+plot(attri_2016$yearmth,attri_2016$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2016$`mean(popularity)` ~ attri_2016$yearmth))
+
+plot(attri_2016$yearmth,attri_2016$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2016$`mean(danceability)` ~ attri_2016$yearmth))
+
+plot(attri_2016$yearmth,attri_2016$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2016$`mean(acousticness)` ~ attri_2016$yearmth))
+
+plot(attri_2016$yearmth,attri_2016$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2016$`mean(energy)` ~ attri_2016$yearmth))
+
+plot(attri_2016$yearmth,attri_2016$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2016$`mean(instrumentalness)` ~ attri_2016$yearmth))
+
+plot(attri_2016$yearmth,attri_2016$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2016$`mean(liveness)` ~ attri_2016$yearmth))
+
+plot(attri_2016$yearmth,attri_2016$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2016$`mean(loudness_sqr)` ~ attri_2016$yearmth))
+
+plot(attri_2016$yearmth,attri_2016$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2016$`mean(speechiness)` ~ attri_2016$yearmth))
+
+plot(attri_2016$yearmth,attri_2016$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2016$`mean(tempo)` ~ attri_2016$yearmth))
+
+plot(attri_2016$yearmth,attri_2016$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2016$`mean(time_signature)` ~ attri_2016$yearmth))
+
+```
+
+Get mean of Attributes for Year 2017
+
+```{r mean_attr_plot_2017, echo=TRUE}
+
+plot(attri_2017$yearmth,attri_2017$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2017$`mean(length_sec)` ~ attri_2017$yearmth))
+
+plot(attri_2017$yearmth,attri_2017$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2017$`mean(popularity)` ~ attri_2017$yearmth))
+
+plot(attri_2017$yearmth,attri_2017$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2017$`mean(danceability)` ~ attri_2017$yearmth))
+
+plot(attri_2017$yearmth,attri_2017$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2017$`mean(acousticness)` ~ attri_2017$yearmth))
+
+plot(attri_2017$yearmth,attri_2017$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2017$`mean(energy)` ~ attri_2017$yearmth))
+
+plot(attri_2017$yearmth,attri_2017$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2017$`mean(instrumentalness)` ~ attri_2017$yearmth))
+
+plot(attri_2017$yearmth,attri_2017$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2017$`mean(liveness)` ~ attri_2017$yearmth))
+
+plot(attri_2017$yearmth,attri_2017$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2017$`mean(loudness_sqr)` ~ attri_2017$yearmth))
+
+plot(attri_2017$yearmth,attri_2017$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2017$`mean(speechiness)` ~ attri_2017$yearmth))
+
+plot(attri_2017$yearmth,attri_2017$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2017$`mean(tempo)` ~ attri_2017$yearmth))
+
+plot(attri_2017$yearmth,attri_2017$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2017$`mean(time_signature)` ~ attri_2017$yearmth))
+
+```
+
+Get mean of Attributes for Year 2018
+
+```{r mean_attr_plot_2018, echo=TRUE}
+
+plot(attri_2018$yearmth,attri_2018$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2018$`mean(length_sec)` ~ attri_2018$yearmth))
+
+plot(attri_2018$yearmth,attri_2018$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2018$`mean(popularity)` ~ attri_2018$yearmth))
+
+plot(attri_2018$yearmth,attri_2018$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2018$`mean(danceability)` ~ attri_2018$yearmth))
+
+plot(attri_2018$yearmth,attri_2018$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2018$`mean(acousticness)` ~ attri_2018$yearmth))
+
+plot(attri_2018$yearmth,attri_2018$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2018$`mean(energy)` ~ attri_2018$yearmth))
+
+plot(attri_2018$yearmth,attri_2018$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2018$`mean(instrumentalness)` ~ attri_2018$yearmth))
+
+plot(attri_2018$yearmth,attri_2018$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2018$`mean(liveness)` ~ attri_2018$yearmth))
+
+plot(attri_2018$yearmth,attri_2018$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2018$`mean(loudness_sqr)` ~ attri_2018$yearmth))
+
+plot(attri_2018$yearmth,attri_2018$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2018$`mean(speechiness)` ~ attri_2018$yearmth))
+
+plot(attri_2018$yearmth,attri_2018$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2018$`mean(tempo)` ~ attri_2018$yearmth))
+
+plot(attri_2018$yearmth,attri_2018$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2018$`mean(time_signature)` ~ attri_2018$yearmth))
+
+```
+
+Get mean of Attributes for Year 2019
+
+```{r mean_attr_plot_2019, echo=TRUE}
+
+plot(attri_2019$yearmth,attri_2019$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2019$`mean(length_sec)` ~ attri_2019$yearmth))
+
+plot(attri_2019$yearmth,attri_2019$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2019$`mean(popularity)` ~ attri_2019$yearmth))
+
+plot(attri_2019$yearmth,attri_2019$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2019$`mean(danceability)` ~ attri_2019$yearmth))
+
+plot(attri_2019$yearmth,attri_2019$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2019$`mean(acousticness)` ~ attri_2019$yearmth))
+
+plot(attri_2019$yearmth,attri_2019$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2019$`mean(energy)` ~ attri_2019$yearmth))
+
+plot(attri_2019$yearmth,attri_2019$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2019$`mean(instrumentalness)` ~ attri_2019$yearmth))
+
+plot(attri_2019$yearmth,attri_2019$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2019$`mean(liveness)` ~ attri_2019$yearmth))
+
+plot(attri_2019$yearmth,attri_2019$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2019$`mean(loudness_sqr)` ~ attri_2019$yearmth))
+
+plot(attri_2019$yearmth,attri_2019$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2019$`mean(speechiness)` ~ attri_2019$yearmth))
+
+plot(attri_2019$yearmth,attri_2019$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2019$`mean(tempo)` ~ attri_2019$yearmth))
+
+plot(attri_2019$yearmth,attri_2019$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2019$`mean(time_signature)` ~ attri_2019$yearmth))
+
+```
+
+Get mean of Attributes for Year 2020
+
+```{r mean_attr_plot_2020, echo=TRUE}
+
+plot(attri_2020$yearmth,attri_2020$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2020$`mean(length_sec)` ~ attri_2020$yearmth))
+
+plot(attri_2020$yearmth,attri_2020$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2020$`mean(popularity)` ~ attri_2020$yearmth))
+
+plot(attri_2020$yearmth,attri_2020$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2020$`mean(danceability)` ~ attri_2020$yearmth))
+
+plot(attri_2020$yearmth,attri_2020$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2020$`mean(acousticness)` ~ attri_2020$yearmth))
+
+plot(attri_2020$yearmth,attri_2020$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2020$`mean(energy)` ~ attri_2020$yearmth))
+
+plot(attri_2020$yearmth,attri_2020$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2020$`mean(instrumentalness)` ~ attri_2020$yearmth))
+
+plot(attri_2020$yearmth,attri_2020$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2020$`mean(liveness)` ~ attri_2020$yearmth))
+
+plot(attri_2020$yearmth,attri_2020$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2020$`mean(loudness_sqr)` ~ attri_2020$yearmth))
+
+plot(attri_2020$yearmth,attri_2020$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2020$`mean(speechiness)` ~ attri_2020$yearmth))
+
+plot(attri_2020$yearmth,attri_2020$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2020$`mean(tempo)` ~ attri_2020$yearmth))
+
+plot(attri_2020$yearmth,attri_2020$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2020$`mean(time_signature)` ~ attri_2020$yearmth))
+
+```
+
+Get mean of Attributes for Year 2021
+
+```{r mean_attr_plot_2021, echo=TRUE}
+
+plot(attri_2021$yearmth,attri_2021$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2021$`mean(length_sec)` ~ attri_2021$yearmth))
+
+plot(attri_2021$yearmth,attri_2021$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2021$`mean(popularity)` ~ attri_2021$yearmth))
+
+plot(attri_2021$yearmth,attri_2021$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2021$`mean(danceability)` ~ attri_2021$yearmth))
+
+plot(attri_2021$yearmth,attri_2021$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2021$`mean(acousticness)` ~ attri_2021$yearmth))
+
+plot(attri_2021$yearmth,attri_2021$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2021$`mean(energy)` ~ attri_2021$yearmth))
+
+plot(attri_2021$yearmth,attri_2021$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2021$`mean(instrumentalness)` ~ attri_2021$yearmth))
+
+plot(attri_2021$yearmth,attri_2021$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2021$`mean(liveness)` ~ attri_2021$yearmth))
+
+plot(attri_2021$yearmth,attri_2021$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2021$`mean(loudness_sqr)` ~ attri_2021$yearmth))
+
+plot(attri_2021$yearmth,attri_2021$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2021$`mean(speechiness)` ~ attri_2021$yearmth))
+
+plot(attri_2021$yearmth,attri_2021$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2021$`mean(tempo)` ~ attri_2021$yearmth))
+
+plot(attri_2021$yearmth,attri_2021$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2021$`mean(time_signature)` ~ attri_2021$yearmth))
+
+```
+
+Get mean of length_sec Attributes
+
+```{r mean_attr_plot_length_sec, echo=TRUE}
+
+plot(attri_2000$yearmth,attri_2000$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2000$`mean(length_sec)` ~ attri_2000$yearmth))
+plot(attri_2001$yearmth,attri_2001$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2001$`mean(length_sec)` ~ attri_2001$yearmth))
+plot(attri_2002$yearmth,attri_2002$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2002$`mean(length_sec)` ~ attri_2002$yearmth))
+plot(attri_2003$yearmth,attri_2003$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2003$`mean(length_sec)` ~ attri_2003$yearmth))
+plot(attri_2004$yearmth,attri_2004$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2004$`mean(length_sec)` ~ attri_2004$yearmth))
+plot(attri_2005$yearmth,attri_2005$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2005$`mean(length_sec)` ~ attri_2005$yearmth))
+plot(attri_2006$yearmth,attri_2006$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2006$`mean(length_sec)` ~ attri_2006$yearmth))
+plot(attri_2007$yearmth,attri_2007$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2007$`mean(length_sec)` ~ attri_2007$yearmth))
+plot(attri_2008$yearmth,attri_2008$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2008$`mean(length_sec)` ~ attri_2008$yearmth))
+plot(attri_2009$yearmth,attri_2009$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2009$`mean(length_sec)` ~ attri_2009$yearmth))
+plot(attri_2010$yearmth,attri_2010$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2010$`mean(length_sec)` ~ attri_2010$yearmth))
+plot(attri_2011$yearmth,attri_2011$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2011$`mean(length_sec)` ~ attri_2011$yearmth))
+plot(attri_2012$yearmth,attri_2012$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2012$`mean(length_sec)` ~ attri_2012$yearmth))
+plot(attri_2013$yearmth,attri_2013$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2013$`mean(length_sec)` ~ attri_2013$yearmth))
+plot(attri_2014$yearmth,attri_2014$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2014$`mean(length_sec)` ~ attri_2014$yearmth))
+plot(attri_2015$yearmth,attri_2015$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2015$`mean(length_sec)` ~ attri_2015$yearmth))
+plot(attri_2016$yearmth,attri_2016$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2016$`mean(length_sec)` ~ attri_2016$yearmth))
+plot(attri_2017$yearmth,attri_2017$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2017$`mean(length_sec)` ~ attri_2017$yearmth))
+plot(attri_2018$yearmth,attri_2018$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2018$`mean(length_sec)` ~ attri_2018$yearmth))
+plot(attri_2019$yearmth,attri_2019$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2019$`mean(length_sec)` ~ attri_2019$yearmth))
+plot(attri_2020$yearmth,attri_2020$`mean(length_sec)`, xlab ="Month" ,ylab ="Avg Length of Song(sec)" ,type = "b",pch=16)
+abline(lm(attri_2020$`mean(length_sec)` ~ attri_2020$yearmth))
+
+```
+
+Get mean of popularity Attributes
+
+```{r mean_attr_plot_popularity, echo=TRUE}
+plot(attri_2000$yearmth,attri_2000$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2000$`mean(popularity)` ~ attri_2000$yearmth))
+plot(attri_2001$yearmth,attri_2001$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2001$`mean(popularity)` ~ attri_2001$yearmth))
+plot(attri_2002$yearmth,attri_2002$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2002$`mean(popularity)` ~ attri_2002$yearmth))
+plot(attri_2003$yearmth,attri_2003$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2003$`mean(popularity)` ~ attri_2003$yearmth))
+plot(attri_2004$yearmth,attri_2004$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2004$`mean(popularity)` ~ attri_2004$yearmth))
+plot(attri_2005$yearmth,attri_2005$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2005$`mean(popularity)` ~ attri_2005$yearmth))
+plot(attri_2006$yearmth,attri_2006$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2006$`mean(popularity)` ~ attri_2006$yearmth))
+plot(attri_2007$yearmth,attri_2007$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2007$`mean(popularity)` ~ attri_2007$yearmth))
+plot(attri_2008$yearmth,attri_2008$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2008$`mean(popularity)` ~ attri_2008$yearmth))
+plot(attri_2009$yearmth,attri_2009$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2009$`mean(popularity)` ~ attri_2009$yearmth))
+plot(attri_2010$yearmth,attri_2010$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2010$`mean(popularity)` ~ attri_2010$yearmth))
+plot(attri_2011$yearmth,attri_2011$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2011$`mean(popularity)` ~ attri_2011$yearmth))
+plot(attri_2012$yearmth,attri_2012$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2012$`mean(popularity)` ~ attri_2012$yearmth))
+plot(attri_2013$yearmth,attri_2013$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2013$`mean(popularity)` ~ attri_2013$yearmth))
+plot(attri_2014$yearmth,attri_2014$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2014$`mean(popularity)` ~ attri_2014$yearmth))
+plot(attri_2015$yearmth,attri_2015$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2015$`mean(popularity)` ~ attri_2015$yearmth))
+plot(attri_2016$yearmth,attri_2016$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2016$`mean(popularity)` ~ attri_2016$yearmth))
+plot(attri_2017$yearmth,attri_2017$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2017$`mean(popularity)` ~ attri_2017$yearmth))
+plot(attri_2018$yearmth,attri_2018$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2018$`mean(popularity)` ~ attri_2018$yearmth))
+plot(attri_2019$yearmth,attri_2019$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2019$`mean(popularity)` ~ attri_2019$yearmth))
+plot(attri_2020$yearmth,attri_2020$`mean(popularity)`, xlab ="Month",ylab ="Avg Popularity",type = "b", pch=16)
+abline(lm(attri_2020$`mean(popularity)` ~ attri_2020$yearmth))
+```
+
+Get mean of danceability Attributes
+
+```{r mean_attr_plot_danceability, echo=TRUE}
+plot(attri_2000$yearmth,attri_2000$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2000$`mean(danceability)` ~ attri_2000$yearmth))
+plot(attri_2001$yearmth,attri_2001$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2001$`mean(danceability)` ~ attri_2001$yearmth))
+plot(attri_2002$yearmth,attri_2002$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2002$`mean(danceability)` ~ attri_2002$yearmth))
+plot(attri_2003$yearmth,attri_2003$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2003$`mean(danceability)` ~ attri_2003$yearmth))
+plot(attri_2004$yearmth,attri_2004$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2004$`mean(danceability)` ~ attri_2004$yearmth))
+plot(attri_2005$yearmth,attri_2005$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2005$`mean(danceability)` ~ attri_2005$yearmth))
+plot(attri_2006$yearmth,attri_2006$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2006$`mean(danceability)` ~ attri_2006$yearmth))
+plot(attri_2007$yearmth,attri_2007$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2007$`mean(danceability)` ~ attri_2007$yearmth))
+plot(attri_2008$yearmth,attri_2008$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2008$`mean(danceability)` ~ attri_2008$yearmth))
+plot(attri_2009$yearmth,attri_2009$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2009$`mean(danceability)` ~ attri_2009$yearmth))
+plot(attri_2010$yearmth,attri_2010$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2010$`mean(danceability)` ~ attri_2010$yearmth))
+plot(attri_2011$yearmth,attri_2011$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2011$`mean(danceability)` ~ attri_2011$yearmth))
+plot(attri_2012$yearmth,attri_2012$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2012$`mean(danceability)` ~ attri_2012$yearmth))
+plot(attri_2013$yearmth,attri_2013$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2013$`mean(danceability)` ~ attri_2013$yearmth))
+plot(attri_2014$yearmth,attri_2014$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2014$`mean(danceability)` ~ attri_2014$yearmth))
+plot(attri_2015$yearmth,attri_2015$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2015$`mean(danceability)` ~ attri_2015$yearmth))
+plot(attri_2016$yearmth,attri_2016$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2016$`mean(danceability)` ~ attri_2016$yearmth))
+plot(attri_2017$yearmth,attri_2017$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2017$`mean(danceability)` ~ attri_2017$yearmth))
+plot(attri_2018$yearmth,attri_2018$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2018$`mean(danceability)` ~ attri_2018$yearmth))
+plot(attri_2019$yearmth,attri_2019$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2019$`mean(danceability)` ~ attri_2019$yearmth))
+plot(attri_2020$yearmth,attri_2020$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2020$`mean(danceability)` ~ attri_2020$yearmth))
+plot(attri_2021$yearmth,attri_2021$`mean(danceability)`, xlab ="Month",ylab ="Avg Danceability",type = "b", pch=16)
+abline(lm(attri_2021$`mean(danceability)` ~ attri_2021$yearmth))
+```
+
+Get mean of acousticness Attributes
+
+```{r mean_attr_plot_acousticness, echo=TRUE}
+plot(attri_2000$yearmth,attri_2000$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2000$`mean(acousticness)` ~ attri_2000$yearmth))
+plot(attri_2001$yearmth,attri_2001$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2001$`mean(acousticness)` ~ attri_2001$yearmth))
+plot(attri_2002$yearmth,attri_2002$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2002$`mean(acousticness)` ~ attri_2002$yearmth))
+plot(attri_2003$yearmth,attri_2003$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2003$`mean(acousticness)` ~ attri_2003$yearmth))
+plot(attri_2004$yearmth,attri_2004$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2004$`mean(acousticness)` ~ attri_2004$yearmth))
+plot(attri_2005$yearmth,attri_2005$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2005$`mean(acousticness)` ~ attri_2005$yearmth))
+plot(attri_2006$yearmth,attri_2006$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2006$`mean(acousticness)` ~ attri_2006$yearmth))
+plot(attri_2007$yearmth,attri_2007$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2007$`mean(acousticness)` ~ attri_2007$yearmth))
+plot(attri_2008$yearmth,attri_2008$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2008$`mean(acousticness)` ~ attri_2008$yearmth))
+plot(attri_2009$yearmth,attri_2009$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2009$`mean(acousticness)` ~ attri_2009$yearmth))
+plot(attri_2010$yearmth,attri_2010$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2010$`mean(acousticness)` ~ attri_2010$yearmth))
+plot(attri_2011$yearmth,attri_2011$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2011$`mean(acousticness)` ~ attri_2011$yearmth))
+plot(attri_2012$yearmth,attri_2012$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2012$`mean(acousticness)` ~ attri_2012$yearmth))
+plot(attri_2013$yearmth,attri_2013$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2013$`mean(acousticness)` ~ attri_2013$yearmth))
+plot(attri_2014$yearmth,attri_2014$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2014$`mean(acousticness)` ~ attri_2014$yearmth))
+plot(attri_2015$yearmth,attri_2015$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2015$`mean(acousticness)` ~ attri_2015$yearmth))
+plot(attri_2016$yearmth,attri_2016$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2016$`mean(acousticness)` ~ attri_2016$yearmth))
+plot(attri_2017$yearmth,attri_2017$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2017$`mean(acousticness)` ~ attri_2017$yearmth))
+plot(attri_2018$yearmth,attri_2018$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2018$`mean(acousticness)` ~ attri_2018$yearmth))
+plot(attri_2019$yearmth,attri_2019$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2019$`mean(acousticness)` ~ attri_2019$yearmth))
+plot(attri_2020$yearmth,attri_2020$`mean(acousticness)`, xlab ="Month",ylab ="Avg Acousticness",type = "b", pch=16)
+abline(lm(attri_2020$`mean(acousticness)` ~ attri_2020$yearmth))
+```
+
+Get mean of energy Attributes
+
+```{r mean_attr_plot_energy, echo=TRUE}
+plot(attri_2000$yearmth,attri_2000$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2000$`mean(energy)` ~ attri_2000$yearmth))
+plot(attri_2001$yearmth,attri_2001$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2001$`mean(energy)` ~ attri_2001$yearmth))
+plot(attri_2002$yearmth,attri_2002$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2002$`mean(energy)` ~ attri_2002$yearmth))
+plot(attri_2003$yearmth,attri_2003$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2003$`mean(energy)` ~ attri_2003$yearmth))
+plot(attri_2004$yearmth,attri_2004$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2004$`mean(energy)` ~ attri_2004$yearmth))
+plot(attri_2005$yearmth,attri_2005$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2005$`mean(energy)` ~ attri_2005$yearmth))
+plot(attri_2006$yearmth,attri_2006$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2006$`mean(energy)` ~ attri_2006$yearmth))
+plot(attri_2007$yearmth,attri_2007$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2007$`mean(energy)` ~ attri_2007$yearmth))
+plot(attri_2008$yearmth,attri_2008$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2008$`mean(energy)` ~ attri_2008$yearmth))
+plot(attri_2009$yearmth,attri_2009$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2009$`mean(energy)` ~ attri_2009$yearmth))
+plot(attri_2010$yearmth,attri_2010$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2010$`mean(energy)` ~ attri_2010$yearmth))
+plot(attri_2011$yearmth,attri_2011$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2011$`mean(energy)` ~ attri_2011$yearmth))
+plot(attri_2012$yearmth,attri_2012$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2012$`mean(energy)` ~ attri_2012$yearmth))
+plot(attri_2013$yearmth,attri_2013$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2013$`mean(energy)` ~ attri_2013$yearmth))
+plot(attri_2014$yearmth,attri_2014$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2014$`mean(energy)` ~ attri_2014$yearmth))
+plot(attri_2015$yearmth,attri_2015$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2015$`mean(energy)` ~ attri_2015$yearmth))
+plot(attri_2016$yearmth,attri_2016$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2016$`mean(energy)` ~ attri_2016$yearmth))
+plot(attri_2017$yearmth,attri_2017$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2017$`mean(energy)` ~ attri_2017$yearmth))
+plot(attri_2018$yearmth,attri_2018$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2018$`mean(energy)` ~ attri_2018$yearmth))
+plot(attri_2019$yearmth,attri_2019$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2019$`mean(energy)` ~ attri_2019$yearmth))
+plot(attri_2020$yearmth,attri_2020$`mean(energy)`, xlab ="Month",ylab ="Avg Energy",type = "b", pch=16)
+abline(lm(attri_2020$`mean(energy)` ~ attri_2020$yearmth))
+```
+
+Get mean of instrumentalness Attributes
+
+```{r mean_attr_plot_instrumentalness, echo=TRUE}
+plot(attri_2000$yearmth,attri_2000$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2000$`mean(instrumentalness)` ~ attri_2000$yearmth))
+plot(attri_2001$yearmth,attri_2001$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2001$`mean(instrumentalness)` ~ attri_2001$yearmth))
+plot(attri_2002$yearmth,attri_2002$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2002$`mean(instrumentalness)` ~ attri_2002$yearmth))
+plot(attri_2003$yearmth,attri_2003$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2003$`mean(instrumentalness)` ~ attri_2003$yearmth))
+plot(attri_2004$yearmth,attri_2004$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2004$`mean(instrumentalness)` ~ attri_2004$yearmth))
+plot(attri_2005$yearmth,attri_2005$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2005$`mean(instrumentalness)` ~ attri_2005$yearmth))
+plot(attri_2006$yearmth,attri_2006$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2006$`mean(instrumentalness)` ~ attri_2006$yearmth))
+plot(attri_2007$yearmth,attri_2007$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2007$`mean(instrumentalness)` ~ attri_2007$yearmth))
+plot(attri_2008$yearmth,attri_2008$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2008$`mean(instrumentalness)` ~ attri_2008$yearmth))
+plot(attri_2009$yearmth,attri_2009$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2009$`mean(instrumentalness)` ~ attri_2009$yearmth))
+plot(attri_2010$yearmth,attri_2010$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2010$`mean(instrumentalness)` ~ attri_2010$yearmth))
+plot(attri_2011$yearmth,attri_2011$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2011$`mean(instrumentalness)` ~ attri_2011$yearmth))
+plot(attri_2012$yearmth,attri_2012$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2012$`mean(instrumentalness)` ~ attri_2012$yearmth))
+plot(attri_2013$yearmth,attri_2013$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2013$`mean(instrumentalness)` ~ attri_2013$yearmth))
+plot(attri_2014$yearmth,attri_2014$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2014$`mean(instrumentalness)` ~ attri_2014$yearmth))
+plot(attri_2015$yearmth,attri_2015$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2015$`mean(instrumentalness)` ~ attri_2015$yearmth))
+plot(attri_2016$yearmth,attri_2016$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2016$`mean(instrumentalness)` ~ attri_2016$yearmth))
+plot(attri_2017$yearmth,attri_2017$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2017$`mean(instrumentalness)` ~ attri_2017$yearmth))
+plot(attri_2018$yearmth,attri_2018$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2018$`mean(instrumentalness)` ~ attri_2018$yearmth))
+plot(attri_2019$yearmth,attri_2019$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2019$`mean(instrumentalness)` ~ attri_2019$yearmth))
+plot(attri_2020$yearmth,attri_2020$`mean(instrumentalness)`, xlab ="Month",ylab ="Avg Instrumentalness",type = "b", pch=16)
+abline(lm(attri_2020$`mean(instrumentalness)` ~ attri_2020$yearmth))
+```
+
+Get mean of liveness Attributes
+
+```{r mean_attr_plot_liveness, echo=TRUE}
+plot(attri_2000$yearmth,attri_2000$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2000$`mean(liveness)` ~ attri_2000$yearmth))
+plot(attri_2001$yearmth,attri_2001$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2001$`mean(liveness)` ~ attri_2001$yearmth))
+plot(attri_2002$yearmth,attri_2002$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2002$`mean(liveness)` ~ attri_2002$yearmth))
+plot(attri_2003$yearmth,attri_2003$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2003$`mean(liveness)` ~ attri_2003$yearmth))
+plot(attri_2004$yearmth,attri_2004$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2004$`mean(liveness)` ~ attri_2004$yearmth))
+plot(attri_2005$yearmth,attri_2005$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2005$`mean(liveness)` ~ attri_2005$yearmth))
+plot(attri_2006$yearmth,attri_2006$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2006$`mean(liveness)` ~ attri_2006$yearmth))
+plot(attri_2007$yearmth,attri_2007$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2007$`mean(liveness)` ~ attri_2007$yearmth))
+plot(attri_2008$yearmth,attri_2008$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2008$`mean(liveness)` ~ attri_2008$yearmth))
+plot(attri_2009$yearmth,attri_2009$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2009$`mean(liveness)` ~ attri_2009$yearmth))
+plot(attri_2010$yearmth,attri_2010$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2010$`mean(liveness)` ~ attri_2010$yearmth))
+plot(attri_2011$yearmth,attri_2011$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2011$`mean(liveness)` ~ attri_2011$yearmth))
+plot(attri_2012$yearmth,attri_2012$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2012$`mean(liveness)` ~ attri_2012$yearmth))
+plot(attri_2013$yearmth,attri_2013$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2013$`mean(liveness)` ~ attri_2013$yearmth))
+plot(attri_2014$yearmth,attri_2014$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2014$`mean(liveness)` ~ attri_2014$yearmth))
+plot(attri_2015$yearmth,attri_2015$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2015$`mean(liveness)` ~ attri_2015$yearmth))
+plot(attri_2016$yearmth,attri_2016$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2016$`mean(liveness)` ~ attri_2016$yearmth))
+plot(attri_2017$yearmth,attri_2017$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2017$`mean(liveness)` ~ attri_2017$yearmth))
+plot(attri_2018$yearmth,attri_2018$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2018$`mean(liveness)` ~ attri_2018$yearmth))
+plot(attri_2019$yearmth,attri_2019$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2019$`mean(liveness)` ~ attri_2019$yearmth))
+plot(attri_2020$yearmth,attri_2020$`mean(liveness)`, xlab ="Month",ylab ="Avg Liveness",type = "b", pch=16)
+abline(lm(attri_2020$`mean(liveness)` ~ attri_2020$yearmth))
+```
+
+Get mean of loudness_sqr Attributes
+
+```{r mean_attr_plot_loudness_sqr, echo=TRUE}
+plot(attri_2000$yearmth,attri_2000$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2000$`mean(loudness_sqr)` ~ attri_2000$yearmth))
+plot(attri_2001$yearmth,attri_2001$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2001$`mean(loudness_sqr)` ~ attri_2001$yearmth))
+plot(attri_2002$yearmth,attri_2002$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2002$`mean(loudness_sqr)` ~ attri_2002$yearmth))
+plot(attri_2003$yearmth,attri_2003$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2003$`mean(loudness_sqr)` ~ attri_2003$yearmth))
+plot(attri_2004$yearmth,attri_2004$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2004$`mean(loudness_sqr)` ~ attri_2004$yearmth))
+plot(attri_2005$yearmth,attri_2005$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2005$`mean(loudness_sqr)` ~ attri_2005$yearmth))
+plot(attri_2006$yearmth,attri_2006$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2006$`mean(loudness_sqr)` ~ attri_2006$yearmth))
+plot(attri_2007$yearmth,attri_2007$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2007$`mean(loudness_sqr)` ~ attri_2007$yearmth))
+plot(attri_2008$yearmth,attri_2008$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2008$`mean(loudness_sqr)` ~ attri_2008$yearmth))
+plot(attri_2009$yearmth,attri_2009$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2009$`mean(loudness_sqr)` ~ attri_2009$yearmth))
+plot(attri_2010$yearmth,attri_2010$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2010$`mean(loudness_sqr)` ~ attri_2010$yearmth))
+plot(attri_2011$yearmth,attri_2011$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2011$`mean(loudness_sqr)` ~ attri_2011$yearmth))
+plot(attri_2012$yearmth,attri_2012$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2012$`mean(loudness_sqr)` ~ attri_2012$yearmth))
+plot(attri_2013$yearmth,attri_2013$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2013$`mean(loudness_sqr)` ~ attri_2013$yearmth))
+plot(attri_2014$yearmth,attri_2014$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2014$`mean(loudness_sqr)` ~ attri_2014$yearmth))
+plot(attri_2015$yearmth,attri_2015$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2015$`mean(loudness_sqr)` ~ attri_2015$yearmth))
+plot(attri_2016$yearmth,attri_2016$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2016$`mean(loudness_sqr)` ~ attri_2016$yearmth))
+plot(attri_2017$yearmth,attri_2017$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2017$`mean(loudness_sqr)` ~ attri_2017$yearmth))
+plot(attri_2018$yearmth,attri_2018$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2018$`mean(loudness_sqr)` ~ attri_2018$yearmth))
+plot(attri_2019$yearmth,attri_2019$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2019$`mean(loudness_sqr)` ~ attri_2019$yearmth))
+plot(attri_2020$yearmth,attri_2020$`mean(loudness_sqr)`, xlab ="Month",ylab ="Avg Loudness(Square of Db)",type = "b", pch=16)
+abline(lm(attri_2020$`mean(loudness_sqr)` ~ attri_2020$yearmth))
+```
+
+Get mean of speechiness Attributes
+
+```{r mean_attr_plot_speechiness, echo=TRUE}
+plot(attri_2000$yearmth,attri_2000$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2000$`mean(speechiness)` ~ attri_2000$yearmth))
+plot(attri_2001$yearmth,attri_2001$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2001$`mean(speechiness)` ~ attri_2001$yearmth))
+plot(attri_2002$yearmth,attri_2002$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2002$`mean(speechiness)` ~ attri_2002$yearmth))
+plot(attri_2003$yearmth,attri_2003$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2003$`mean(speechiness)` ~ attri_2003$yearmth))
+plot(attri_2004$yearmth,attri_2004$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2004$`mean(speechiness)` ~ attri_2004$yearmth))
+plot(attri_2005$yearmth,attri_2005$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2005$`mean(speechiness)` ~ attri_2005$yearmth))
+plot(attri_2006$yearmth,attri_2006$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2006$`mean(speechiness)` ~ attri_2006$yearmth))
+plot(attri_2007$yearmth,attri_2007$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2007$`mean(speechiness)` ~ attri_2007$yearmth))
+plot(attri_2008$yearmth,attri_2008$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2008$`mean(speechiness)` ~ attri_2008$yearmth))
+plot(attri_2009$yearmth,attri_2009$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2009$`mean(speechiness)` ~ attri_2009$yearmth))
+plot(attri_2010$yearmth,attri_2010$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2010$`mean(speechiness)` ~ attri_2010$yearmth))
+plot(attri_2011$yearmth,attri_2011$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2011$`mean(speechiness)` ~ attri_2011$yearmth))
+plot(attri_2012$yearmth,attri_2012$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2012$`mean(speechiness)` ~ attri_2012$yearmth))
+plot(attri_2013$yearmth,attri_2013$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2013$`mean(speechiness)` ~ attri_2013$yearmth))
+plot(attri_2014$yearmth,attri_2014$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2014$`mean(speechiness)` ~ attri_2014$yearmth))
+plot(attri_2015$yearmth,attri_2015$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2015$`mean(speechiness)` ~ attri_2015$yearmth))
+plot(attri_2016$yearmth,attri_2016$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2016$`mean(speechiness)` ~ attri_2016$yearmth))
+plot(attri_2017$yearmth,attri_2017$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2017$`mean(speechiness)` ~ attri_2017$yearmth))
+plot(attri_2018$yearmth,attri_2018$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2018$`mean(speechiness)` ~ attri_2018$yearmth))
+plot(attri_2019$yearmth,attri_2019$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2019$`mean(speechiness)` ~ attri_2019$yearmth))
+plot(attri_2020$yearmth,attri_2020$`mean(speechiness)`, xlab ="Month",ylab ="Avg Speechiness",type = "b", pch=16)
+abline(lm(attri_2020$`mean(speechiness)` ~ attri_2020$yearmth))
+```
+
+Get mean of tempo Attributes
+
+```{r mean_attr_plot_tempo, echo=TRUE}
+plot(attri_2000$yearmth,attri_2000$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2000$`mean(tempo)` ~ attri_2000$yearmth))
+plot(attri_2001$yearmth,attri_2001$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2001$`mean(tempo)` ~ attri_2001$yearmth))
+plot(attri_2002$yearmth,attri_2002$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2002$`mean(tempo)` ~ attri_2002$yearmth))
+plot(attri_2003$yearmth,attri_2003$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2003$`mean(tempo)` ~ attri_2003$yearmth))
+plot(attri_2004$yearmth,attri_2004$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2004$`mean(tempo)` ~ attri_2004$yearmth))
+plot(attri_2005$yearmth,attri_2005$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2005$`mean(tempo)` ~ attri_2005$yearmth))
+plot(attri_2006$yearmth,attri_2006$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2006$`mean(tempo)` ~ attri_2006$yearmth))
+plot(attri_2007$yearmth,attri_2007$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2007$`mean(tempo)` ~ attri_2007$yearmth))
+plot(attri_2008$yearmth,attri_2008$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2008$`mean(tempo)` ~ attri_2008$yearmth))
+plot(attri_2009$yearmth,attri_2009$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2009$`mean(tempo)` ~ attri_2009$yearmth))
+plot(attri_2010$yearmth,attri_2010$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2010$`mean(tempo)` ~ attri_2010$yearmth))
+plot(attri_2011$yearmth,attri_2011$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2011$`mean(tempo)` ~ attri_2011$yearmth))
+plot(attri_2012$yearmth,attri_2012$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2012$`mean(tempo)` ~ attri_2012$yearmth))
+plot(attri_2013$yearmth,attri_2013$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2013$`mean(tempo)` ~ attri_2013$yearmth))
+plot(attri_2014$yearmth,attri_2014$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2014$`mean(tempo)` ~ attri_2014$yearmth))
+plot(attri_2015$yearmth,attri_2015$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2015$`mean(tempo)` ~ attri_2015$yearmth))
+plot(attri_2016$yearmth,attri_2016$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2016$`mean(tempo)` ~ attri_2016$yearmth))
+plot(attri_2017$yearmth,attri_2017$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2017$`mean(tempo)` ~ attri_2017$yearmth))
+plot(attri_2018$yearmth,attri_2018$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2018$`mean(tempo)` ~ attri_2018$yearmth))
+plot(attri_2019$yearmth,attri_2019$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2019$`mean(tempo)` ~ attri_2019$yearmth))
+plot(attri_2020$yearmth,attri_2020$`mean(tempo)`, xlab ="Month",ylab ="Avg Tempo",type = "b", pch=16)
+abline(lm(attri_2020$`mean(tempo)` ~ attri_2020$yearmth))
+```
+
+Get mean of time_signature Attributes
+
+```{r mean_attr_plot_time_signature, echo=TRUE}
+plot(attri_2000$yearmth,attri_2000$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2000$`mean(time_signature)` ~ attri_2000$yearmth))
+plot(attri_2001$yearmth,attri_2001$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2001$`mean(time_signature)` ~ attri_2001$yearmth))
+plot(attri_2002$yearmth,attri_2002$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2002$`mean(time_signature)` ~ attri_2002$yearmth))
+plot(attri_2003$yearmth,attri_2003$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2003$`mean(time_signature)` ~ attri_2003$yearmth))
+plot(attri_2004$yearmth,attri_2004$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2004$`mean(time_signature)` ~ attri_2004$yearmth))
+plot(attri_2005$yearmth,attri_2005$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2005$`mean(time_signature)` ~ attri_2005$yearmth))
+plot(attri_2006$yearmth,attri_2006$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2006$`mean(time_signature)` ~ attri_2006$yearmth))
+plot(attri_2007$yearmth,attri_2007$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2007$`mean(time_signature)` ~ attri_2007$yearmth))
+plot(attri_2008$yearmth,attri_2008$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2008$`mean(time_signature)` ~ attri_2008$yearmth))
+plot(attri_2009$yearmth,attri_2009$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2009$`mean(time_signature)` ~ attri_2009$yearmth))
+plot(attri_2010$yearmth,attri_2010$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2010$`mean(time_signature)` ~ attri_2010$yearmth))
+plot(attri_2011$yearmth,attri_2011$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2011$`mean(time_signature)` ~ attri_2011$yearmth))
+plot(attri_2012$yearmth,attri_2012$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2012$`mean(time_signature)` ~ attri_2012$yearmth))
+plot(attri_2013$yearmth,attri_2013$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2013$`mean(time_signature)` ~ attri_2013$yearmth))
+plot(attri_2014$yearmth,attri_2014$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2014$`mean(time_signature)` ~ attri_2014$yearmth))
+plot(attri_2015$yearmth,attri_2015$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2015$`mean(time_signature)` ~ attri_2015$yearmth))
+plot(attri_2016$yearmth,attri_2016$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2016$`mean(time_signature)` ~ attri_2016$yearmth))
+plot(attri_2017$yearmth,attri_2017$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2017$`mean(time_signature)` ~ attri_2017$yearmth))
+plot(attri_2018$yearmth,attri_2018$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2018$`mean(time_signature)` ~ attri_2018$yearmth))
+plot(attri_2019$yearmth,attri_2019$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2019$`mean(time_signature)` ~ attri_2019$yearmth))
+plot(attri_2020$yearmth,attri_2020$`mean(time_signature)`, xlab ="Month",ylab ="Avg Time Signature",type = "b", pch=16)
+abline(lm(attri_2020$`mean(time_signature)` ~ attri_2020$yearmth))
+```
+
+Get Peak Rank for Song
+
+```{r peak_rank_song, echo=TRUE}
+
+peak_rank_for_song <- rank %>%
+  select(artist,song,peak.rank) %>%
+  group_by(artist,song) %>%
+  summarise(n = n(),highest_rank = min(peak.rank))
+
+head(peak_rank_for_song)
+
+```
+
+Get Peak Rank for Artist
+
+```{r peak_rank_artist, echo=TRUE}
+peak_artiste_rank <- peak_rank_for_song %>%
+  group_by(artist) %>%
+  summarise(peak_rank = min(highest_rank)) %>%
+  arrange(artist)
+
+head(peak_artiste_rank)
+```
+
+Get hit songs (rank of songs \< 21)
+
+```{r hit_song, echo=TRUE}
+hit_songs <- peak_rank_for_song %>%
+  filter(highest_rank < 21) %>%
+  arrange(song)
+
+head(hit_songs)
+```
+
+Get Artiste with highest number of hits songs (rank of songs \< 21)
+
+```{r rank_song_1_20, echo=TRUE}
+highest_no_rank1 <- peak_rank_for_song %>%
+  filter(highest_rank < 21) %>%
+  group_by(artist) %>%
+  summarise(n =n()) %>%
+  arrange(desc(n))
+
+head(highest_no_rank1)
+
+```
+
+Prelim OLS examine
+
+```{r prelim_ols_exa, echo=TRUE}
+
+ols08 = lm(popularity ~ tempo, data = main_df_selected_08)
+ols19 = lm(popularity ~ tempo, data = main_df_selected_19)
+ols20 = lm(popularity ~ tempo, data = main_df_selected_20)
+
+# quite often, we just apply heteroskedasticity robust s.e.
+coeftest(ols08, vcov. = vcovHC, type = "HC1")
+coeftest(ols19, vcov. = vcovHC, type = "HC1")
+coeftest(ols20, vcov. = vcovHC, type = "HC1")
+
+# scatterplot and fitted line for year 2008
+plot(x = main_df_selected_08$tempo, 
+     y = main_df_selected_08$popularity, 
+     xlab = "tempo (Beats per second)",
+     ylab = "Popularity",
+     main = "Popularity vs Tempo in year 2008 - finaicial crisis",
+     ylim = c(0, 100),
+    )
+abline(ols08, lwd = 1.5, col = 'red')
+
+# scatterplot and fitted line for year 2019
+plot(x = main_df_selected_19$tempo, 
+     y = main_df_selected_19$popularity, 
+     xlab = "tempo (Beats per second)",
+     ylab = "Popularity",
+     main = "Popularity vs Tempo in year 2019 - Before Covid",
+     ylim = c(0, 100),
+    )
+abline(ols19, lwd = 1.5, col = 'red')
+
+# scatterplot and fitted line for year 2020 - Covid
+plot(x = main_df_selected_20$tempo, 
+     y = main_df_selected_20$popularity, 
+     xlab = "tempo (Beats per second)",
+     ylab = "Popularity",
+     main = "Popularity vs Tempo in year 2020 - Covid",
+     ylim = c(0, 100),
+    )
+abline(ols20, lwd = 1.5, col = 'red')
+```
+
+From these three simple linear regression models on year 2008, 2019 and 2020, it is "surprising" to see that `popularity`and `tempo`are *negatively* associated - for years of crisis and positively associated - for normal year. The coefficient of `tempo` is significant. Without careful inspection and further analysis, one could've concluded that when having global crisis, people trends to listen to slower music and it is more popular.
+
+```{r check-ols-assumption, echo=TRUE}
+# let's check the assumption of these OLS models
+plot(ols08, c(1,2))
+plot(ols19, c(1,2))
+plot(ols20, c(1,2))
+```
+
+Not surprisingly, strictly exogeneity assumption is subject to serious challenge since the sample average of residuals do not look have mean zero in all three cases and it shows a slightly positive trend in the residual plot (a signal for systematic biases). This might be the consequences of omitted variable since simple linear regression model does not include any other available covariates. However, even multivariate linear regressions models won't be able to tell since given such panel data, each rank might have strong **heterogeneity** for its popularity, i.e. the "fixed effect" $\alpha_i$, that correlates with all available covariates in the dataset.
+
+We need to take the advantage of panel structure to handle with the fixed effect.
+
+## Part C: Data Analysis
+
+K-Mean
+
+```{r kMean_data, echo=TRUE}
+
+# plot within-cluster sum of squares distance'' as a function of the number of clusters
+kmeandata = main_df
+
+kmeandata = subset(kmeandata, select = c (length_sec, popularity, danceability, acousticness, energy, instrumentalness, liveness, loudness_sqr, speechiness, tempo, time_signature))
+
+kmeandata = as.data.frame(unclass(kmeandata))
+summary(kmeandata)
+dim(kmeandata)
+
+kmeanclean = as.numeric(unlist(kmeandata))
+kmeanclean = na.omit(kmeandata)
+
+###################################rank vs popu main_df##################
+km_rank_popu = main_df
+km_rank_popu = subset(km_rank_popu, select = c (rank, popularity))
+
+km_rank_popu = as.data.frame(unclass(km_rank_popu))
+km_rank_popu = na.omit(km_rank_popu)
+
+###################################rank vs popu main_df_rankInfo##################
+km_rank_popu_se = main_df_rankInfo
+km_rank_popu_se = subset(km_rank_popu_se, select = c (rank, popularity))
+
+km_rank_popu_se = as.data.frame(unclass(km_rank_popu_se))
+km_rank_popu_se = na.omit(km_rank_popu_se)
+
+
+
+############mean rank vs tempo
+km_mrank_tempo_se = main_df_rankInfo
+km_mrank_tempo_se = subset(km_mrank_tempo_se, select = c (mean_rank, tempo))
+
+km_mrank_tempo_se = as.data.frame(unclass(km_mrank_tempo_se))
+km_mrank_tempo_se = na.omit(km_mrank_tempo_se)
+
+############mean rank vs energy
+km_mrank_energy_se = main_df_rankInfo
+km_mrank_energy_se = subset(km_mrank_energy_se, select = c (mean_rank, energy))
+
+km_mrank_energy_se = as.data.frame(unclass(km_mrank_energy_se))
+km_mrank_energy_se = na.omit(km_mrank_energy_se)
+
+
+############mean rank vs dancebility
+km_mrank_danceability_se = main_df_rankInfo
+km_mrank_danceability_se = subset(km_mrank_danceability_se, select = c (mean_rank, danceability))
+
+km_mrank_danceability_se = as.data.frame(unclass(km_mrank_danceability_se))
+km_mrank_danceability_se = na.omit(km_mrank_danceability_se)
+
+
+
+############popu vs tempo
+km_popu_tempo_se = main_df_rankInfo
+km_popu_tempo_se = subset(km_popu_tempo_se, select = c (popularity, tempo))
+
+km_popu_tempo_se = as.data.frame(unclass(km_popu_tempo_se))
+km_popu_tempo_se = na.omit(km_popu_tempo_se)
+
+############popu rank vs energy
+km_popu_energy_se = main_df_rankInfo
+km_popu_energy_se = subset(km_popu_energy_se, select = c (popularity, energy))
+
+km_popu_energy_se = as.data.frame(unclass(km_popu_energy_se))
+km_popu_energy_se = na.omit(km_popu_energy_se)
+
+
+############popu rank vs dancebility
+km_popu_danceability_se = main_df_rankInfo
+km_popu_danceability_se = subset(km_popu_danceability_se, select = c (popularity, danceability))
+
+km_popu_danceability_se = as.data.frame(unclass(km_popu_danceability_se))
+km_popu_danceability_se = na.omit(km_popu_danceability_se)
+
+
+# summary(kmeanclean)
+# dim(kmeanclean)
+
+#Data Coeifficient
+#psych::pairs.panels(kmeanclean, lm=TRUE)
+
+```
+
+```{r kMean, message = FALSE, warning = FALSE, echo=TRUE}
+####################################all arrtibutes from main_df##############
+wss = rep(NA, 10)
+for (k in c(1:10)){
+  wss[k] = kmeans(kmeanclean, k, nstart = 10)$tot.withinss
+}
+cexs = rep(1, length(wss))
+cexs[3] = 2
+pchs = rep(1, length(wss))
+pchs[3] = 2
+cols = rep('black', length(wss))
+cols[3] = 'red'
+plot(wss, type = 'b', xlab = 'number of clusters, k', ylab = 'within cluster sum of squares distance', col = cols, pch = pchs, cex = cexs)
+
+####################################rank, popu from main_df##############
+wss = rep(NA, 10)
+for (k in c(1:10)){
+  wss[k] = kmeans(km_rank_popu, k, nstart = 20)$tot.withinss
+}
+cexs = rep(1, length(wss))
+cexs[3] = 2
+pchs = rep(1, length(wss))
+pchs[3] = 2
+cols = rep('black', length(wss))
+cols[3] = 'red'
+plot(wss, type = 'b', xlab = 'number of clusters, k', ylab = 'within cluster sum of squares distance', col = cols, pch = pchs, cex = cexs)
+
+####################################rank, popu from main_df_rankInfo##############
+wss = rep(NA, 10)
+for (k in c(1:10)){
+  wss[k] = kmeans(km_rank_popu_se, k, nstart = 20)$tot.withinss
+}
+cexs = rep(1, length(wss))
+cexs[3] = 2
+pchs = rep(1, length(wss))
+pchs[3] = 2
+cols = rep('black', length(wss))
+cols[3] = 'red'
+plot(wss, type = 'b', xlab = 'number of clusters, k', ylab = 'within cluster sum of squares distance', col = cols, pch = pchs, cex = cexs)
+
+```
+
+```{r kMean_plot, message = FALSE, warning = FALSE, echo=TRUE}
+km = kmeans(kmeanclean, center = 3, nstart = 10)
+
+fviz_cluster(km, data = kmeanclean,
+             palette = c("#00AFBB","#2E9FDF", "#FC4E07"),
+             ggtheme = theme_minimal(),
+             main = "clusters Plot for full attrubutes")
+km$size
+km$centers
+
+#############################rank vs popu main_df#######################
+km_r_p = kmeans(km_rank_popu, center = 3, nstart = 10)
+
+fviz_cluster(km_r_p, data = km_rank_popu,
+             palette = c("#00AFBB","#2E9FDF", "#FC4E07"),
+             ggtheme = theme_minimal(),
+             main = "clusters Plot")
+
+km_r_p$size
+km_r_p$centers
+
+#############################rank vs popu main_df_selected###############
+km_r_p_se = kmeans(km_rank_popu_se, center = 3, nstart = 10)
+
+fviz_cluster(km_r_p_se, data = km_rank_popu_se,
+             palette = c("#00AFBB","#2E9FDF", "#FC4E07"),
+             ggtheme = theme_minimal(),
+             main = "clusters Plot")
+
+ggplot(data = km_rank_popu_se, aes(y = popularity)) +
+  geom_bar(aes(fill = rank)) +
+  ggtitle("Count of Clusters by populatrity") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+km_r_p_se$size
+km_r_p_se$centers
+#############################mean rank vs tempo main_df_selected###############
+km_mr_t_se = kmeans(km_mrank_tempo_se, center = 3, nstart = 10)
+
+fviz_cluster(km_mr_t_se, data = km_mrank_tempo_se,
+             palette = c("#00AFBB","#2E9FDF", "#FC4E07"),
+             ggtheme = theme_minimal(),
+             main = "clusters Plot - mean rank vs tempo")
+km_mr_t_se$size
+km_mr_t_se$centers
+#############################mean rank vs energy main_df_selected###############
+km_mr_e_se = kmeans(km_mrank_energy_se, center = 3, nstart = 10)
+
+fviz_cluster(km_mr_e_se, data = km_mrank_energy_se,
+             palette = c("#00AFBB","#2E9FDF", "#FC4E07"),
+             ggtheme = theme_minimal(),
+             main = "clusters Plot - mean rank vs energy")
+
+km_mr_e_se$size
+km_mr_e_se$centers
+
+#############################mean rank vs tempo main_df_selected###############
+km_mr_d_se = kmeans(km_mrank_danceability_se, center = 3, nstart = 10)
+
+fviz_cluster(km_mr_d_se, data = km_mrank_danceability_se,
+             palette = c("#00AFBB","#2E9FDF", "#FC4E07"),
+             ggtheme = theme_minimal(),
+             main = "clusters Plot - mean rank vs danceability")
+
+km_mr_d_se$size
+km_mr_d_se$centers
+#############################popularity vs tempo main_df_selected###############
+km_p_t_se = kmeans(km_popu_tempo_se, center = 3, nstart = 10)
+
+fviz_cluster(km_p_t_se, data = km_popu_tempo_se,
+             palette = c("#00AFBB","#2E9FDF", "#FC4E07"),
+             ggtheme = theme_minimal(),
+             main = "clusters Plot - popularity vs tempo")
+
+km_p_t_se$size
+km_p_t_se$centers
+#############################popularity vs energy main_df_selected###############
+km_p_e_se = kmeans(km_popu_energy_se, center = 3, nstart = 10)
+
+fviz_cluster(km_p_e_se, data = km_popu_energy_se,
+             palette = c("#00AFBB","#2E9FDF", "#FC4E07"),
+             ggtheme = theme_minimal(),
+             main = "clusters Plot - popularity vs energy")
+
+km_p_e_se$size
+km_p_e_se$centers
+#######################popularity vs danceability main_df_selected###############
+km_p_d_se = kmeans(km_popu_danceability_se, center = 3, nstart = 10)
+
+fviz_cluster(km_p_d_se, data = km_popu_danceability_se,
+             palette = c("#00AFBB","#2E9FDF", "#FC4E07"),
+             ggtheme = theme_minimal(),
+             main = "clusters Plot - popularity vs dancebility")
+
+km_p_d_se$size
+km_p_d_se$centers
+
+
+```
+
+Plots and model selection
+
+```{r Model_plot, echo=TRUE }
+######################Residual vs fitted plot for best rank################# 
+fit_bestr = lm(best_rank ~ length_sec + danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr+ speechiness+ tempo + time_signature, main_df_rankInfo)
+est = summary(fit_bestr)
+est
+plot(fit_bestr,1)
+plot(fit_bestr,2)
+
+######################Residual vs fitted plot for mean rank#################
+fit_meanr = lm(mean_rank ~ length_sec + danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr+ speechiness+ tempo + time_signature, main_df_rankInfo)
+est1 = summary(fit_meanr)
+est1
+plot(fit_meanr,1)
+plot(fit_meanr,2)
+
+#################meain_df_rankInfo -> balanced df with unique id#############
+fit_popu_se = lm(popularity ~ length_sec  + danceability + acousticness+energy + instrumentalness + liveness+ loudness_sqr+ speechiness+ tempo + time_signature, main_df_rankInfo)
+est2 = summary(fit_popu_se)
+est2
+plot(fit_popu_se,1)
+plot(fit_popu_se,2)
+
+
+###########Residual vs fitted plot for popularity full dataframe#################
+fit_popu_full = lm(popularity ~ length_sec + danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr+ speechiness+ tempo + time_signature, main_df_selected)
+est3 = summary(fit_popu_full)
+est3
+plot(fit_popu_full,1)
+plot(fit_popu_full,2)
+
+
+###########Residual vs fitted plot for popularity hit_song, main_df_hit_song_rank##
+fit_popu_hit = lm(popularity ~ length_sec + danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr+ speechiness+ tempo + time_signature + hit_song , main_df_hit_song_rank)
+## glm
+# fit_popu_hit = glm(hit_song ~ length_sec + danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr+ speechiness+ tempo + time_signature, family = binomial, data = main_df_hit_song_rank) 
+
+est3 = summary(fit_popu_hit)
+est3
+plot(fit_popu_hit,1)
+plot(fit_popu_hit,2)
+
+###########Residual vs fitted plot for best rank hit_song, main_df_hit_song_rank##
+fit_bestr_hit = lm(best_rank ~ length_sec + danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr+ speechiness+ tempo + time_signature + hit_song, main_df_hit_song_rank)
+est3 = summary(fit_bestr_hit)
+est3
+plot(fit_bestr_hit,1)
+plot(fit_bestr_hit,2)
+
+
+###########Residual vs fitted plot for mean rank hit_song, main_df_hit_song_rank##
+fit_meanr_hit = lm(mean_rank ~ length_sec + danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr+ speechiness+ tempo + time_signature + hit_song, main_df_hit_song_rank)
+est3 = summary(fit_meanr_hit)
+est3
+plot(fit_meanr_hit,1)
+plot(fit_meanr_hit,2)
+
+
+
+```
+
+BPtest and SE fix
+
+```{r BPTest, echo=TRUE}
+
+#Breusch-Pagan test, Residual plot is fan-shaped, p-value is less than 2.2e-16  
+bptest(fit_popu_se)
+
+#Conducted Whitehuber Robust Standard Error to fix
+coeftest(fit_popu_se, vcov = sandwich)
+
+#For remaining models
+bptest(fit_bestr)
+coeftest(fit_bestr, vcov = sandwich)
+
+bptest(fit_meanr)
+coeftest(fit_meanr, vcov = sandwich)
+
+bptest(fit_popu_full)
+coeftest(fit_popu_full, vcov = sandwich)
+```
+
+Backward Step Wise
+
+```{r SW_backward, echo=TRUE}
+# #Backward stepwise for best rank
+# step(fit_bestr, direction = 'backward')
+# #Backward stepwise for mean rank
+# step(fit_meanr, direction = 'backward')
+# #Backward stepwise for popularity
+# step(fit_popu_full, direction = 'backward')
+
+#Backward stepwise for popularity
+step(fit_popu_se, direction = 'backward')
+step(fit_popu_full, direction = 'backward')
+```
+
+Result from backward step wise:
+
+[fit_popu_se]{.ul}
+
+*formula = popularity \~ length_sec + danceability + energy + instrumentalness + loudness_sqr + tempo + time_signature, data = main_df_rankInfo*
+
+[fit_popu_full]{.ul}
+
+*formula = popularity \~ length_sec + danceability + acousticness + energy + instrumentalness + liveness + loudness_sqr + speechiness + tempo + time_signature, data = main_df_selected*
+
+###############################################################################################APPENDIX - Panel Analysis - For Reference ONLY#########################
+
+[**1.1 Fix effect model**]{.ul}
+
+```{r FEM, echo=TRUE}
+# fixed effect estimation
+
+#####mean_df_rankInfo optimised arrtibutes for unique song#########################
+
+fe = plm(popularity ~ length_sec + danceability + energy + instrumentalness + loudness_sqr + tempo + time_signature, data = main_df_rankInfo,
+          index = c("rank", "date"),
+          model = "within", effect = "twoways")
+
+#####mean_df_rankInfo full arrtibutes for unique song#########################
+
+fe_full_attri = plm(popularity ~ length_sec +  danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr + speechiness+ tempo + time_signature, data = main_df_rankInfo,
+          index = c("rank", "date"),
+          model = "within", effect = "twoways")
+
+
+######mean_df_selected full list of songs#########################
+
+fe_full_list = plm(popularity ~ length_sec +  danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr + speechiness+ tempo + time_signature, data = main_df_selected,
+          index = c("rank", "date"),
+          model = "within", effect = "twoways")
+
+
+ summary(fe)
+ summary(fe_full_attri)
+ summary(fe_full_list)
+ 
+#An important feature of panel data is that there is often correlation between the errors within an entity. This could be due to serial correlation, i.e., persistent effects for all temporal observations for an entity. When errors are correlated, the conventional estimates of the standard errors are incorrect. In many cases the estimated SE are too small, which leads to excessive confidence (biased) in the precision of the results. Fortunately, we can correct the SE's for the existence of correlation across time periods within the entities using clustered standard errors 
+
+pwartest(fe) 
+fe.robust = coeftest(fe, vcov. = vcovHC, type = "HC1")
+print(fe.robust)
+
+pwartest(fe_full_attri) 
+fe_full_attri.robust = coeftest(fe_full_attri, vcov. = vcovHC, type = "HC1")
+print(fe_full_attri.robust)
+ 
+pwartest(fe_full_list) 
+fe_full_list.robust = coeftest(fe_full_list, vcov. = vcovHC, type = "HC1")
+print(fe_full_list.robust)
+ 
+```
+
+**1.2 Plots**
+
+```{r fe_plots, echo=TRUE}
+
+fitted_fe = fe$model[[1]] - fe$residuals
+
+residplot = as.data.frame(cbind(fitted_fe, fe$residuals))
+colnames(residplot) = c("Fitted", "Residual")
+ggplot(residplot, aes(x = Fitted, y = Residual)) + ggtitle("Unique song with selected attributes")+
+  geom_point(shape = 1, col = "black") +
+  geom_hline(yintercept = 0, col = "red") + 
+  theme_light()
+
+fitted_fe_full_attri = fe_full_attri$model[[1]] - fe_full_attri$residuals
+
+residplot = as.data.frame(cbind(fitted_fe_full_attri, fe_full_attri$residuals))
+colnames(residplot) = c("Fitted", "Residual")
+ggplot(residplot, aes(x = Fitted, y = Residual)) + ggtitle("Unique song with full attributes")+
+  geom_point(shape = 1, col = "black") +
+  geom_hline(yintercept = 0, col = "red") + 
+  theme_light()
+
+
+fitted_fe_full_list = fe_full_list$model[[1]] - fe_full_list$residuals
+
+residplot = as.data.frame(cbind(fitted_fe_full_list, fe_full_list$residuals))
+colnames(residplot) = c("Fitted", "Residual")
+ggplot(residplot, aes(x = Fitted, y = Residual)) + ggtitle("Full song list")+
+  geom_point(shape = 1, col = "black") +
+  geom_hline(yintercept = 0, col = "red") + 
+  theme_light()
+
+```
+
+[**1.3 Variance Inflation Factor**]{.ul}
+
+```{r FEM_VIF, echo=TRUE}
+print("mean_df_rankInfo optimised arrtibutes for unique song")
+vif(fe)
+print("mean_df_rankInfo full arrtibutes for unique song")
+vif(fe_full_attri)
+print("mean_df_selected full list of songs")
+vif(fe_full_list)
+```
+
+[**2.1 Random Effects Model**]{.ul}
+
+```{r REM, echo=TRUE}
+
+#####mean_df_rankInfo optimised arrtibutes for unique song#########################
+
+re = plm(popularity ~ length_sec + danceability + energy + instrumentalness + loudness_sqr + tempo + time_signature, data = main_df_rankInfo,
+          index = c("rank", "date"),
+          model = "random")
+
+#####mean_df_rankInfo full arrtibutes for unique song#########################
+
+re_full_attri = plm(popularity ~ length_sec +  danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr + speechiness+ tempo + time_signature, data = main_df_rankInfo,
+          index = c("rank", "date"),
+          model = "random")
+
+
+######mean_df_selected full list of songs#########################
+
+re_full_list = plm(popularity ~ length_sec +  danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr + speechiness+ tempo + time_signature, data = main_df_selected,
+          index = c("rank", "date"),
+          model = "random")
+
+summary(re)
+summary(re_full_attri)
+summary(re_full_list)
+ 
+
+re.robust = coeftest(re, vcov. = vcovHC, type = "HC1")
+print(re.robust)
+
+
+re_full_attri.robust = coeftest(re_full_attri, vcov. = vcovHC, type = "HC1")
+print(re_full_attri.robust)
+ 
+
+re_full_list.robust = coeftest(re_full_list, vcov. = vcovHC, type = "HC1")
+print(re_full_list.robust)
+ 
+ 
+
+```
+
+**2.2 Plots**
+
+```{r RE_plots, echo=TRUE}
+fitted_re = re$model[[1]] - re$residuals
+
+residplot = as.data.frame(cbind(fitted_re, re$residuals))
+colnames(residplot) = c("Fitted", "Residual")
+ggplot(residplot, aes(x = Fitted, y = Residual)) + ggtitle("Unique song with selected attributes")+
+  geom_point(shape = 1, col = "black") +
+  geom_hline(yintercept = 0, col = "red") + 
+  theme_light()
+
+fitted_re_full_attri = re_full_attri$model[[1]] - re_full_attri$residuals
+
+residplot = as.data.frame(cbind(fitted_re_full_attri, re_full_attri$residuals))
+colnames(residplot) = c("Fitted", "Residual")
+ggplot(residplot, aes(x = Fitted, y = Residual)) + ggtitle("Unique song with full attributes")+
+  geom_point(shape = 1, col = "black") +
+  geom_hline(yintercept = 0, col = "red") + 
+  theme_light()
+
+
+fitted_re_full_list = re_full_list$model[[1]] - re_full_list$residuals
+
+residplot = as.data.frame(cbind(fitted_re_full_list, re_full_list$residuals))
+colnames(residplot) = c("Fitted", "Residual")
+ggplot(residplot, aes(x = Fitted, y = Residual)) + ggtitle("Full song list")+
+  geom_point(shape = 1, col = "black") +
+  geom_hline(yintercept = 0, col = "red") + 
+  theme_light()
+```
+
+[**2.3 Variance Inflation Factor**]{.ul}
+
+```{r REM_VIF, echo=TRUE}
+print("mean_df_rankInfo optimised arrtibutes for unique song")
+vif(re)
+print("mean_df_rankInfo full arrtibutes for unique song")
+vif(re_full_attri)
+print("mean_df_selected full list of songs")
+vif(re_full_list)
+
+```
+
+[**2.5 Hausman Test**]{.ul}
+
+```{r REM_HT, echo=TRUE}
+# conduct the Hausman test on RE vs. FE with function `phtest` in `plm`
+phtest(fe, re)
+
+# robust Hausman test with vcov supplied as a function and additional parameters
+phtest(popularity ~ length_sec + danceability + energy + instrumentalness + loudness_sqr + tempo + time_signature, data = main_df_rankInfo, method = "aux", 
+       vcov = function(x) vcovHC(x, type = "HC1"))
+
+#Based on the results shown above, we can safely reject the null hypotheses for both Hausman tests and conclude that the FE estimator is more consistent than the RE estimator.
+
+# conduct the Hausman test on RE vs. FE with function `phtest` in `plm`
+phtest(fe_full_attri, re_full_attri)
+
+# robust Hausman test with vcov supplied as a function and additional parameters
+phtest(popularity ~ length_sec +  danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr + speechiness+ tempo + time_signature, data = main_df_rankInfo, method = "aux", 
+       vcov = function(x) vcovHC(x, type = "HC1"))
+
+#Based on the results shown above, we can safely reject the null hypotheses for both Hausman tests and conclude that the FE estimator is more consistent than the RE estimator.
+
+# conduct the Hausman test on RE vs. FE with function `phtest` in `plm`
+phtest(fe_full_list, re_full_list)
+
+# robust Hausman test with vcov supplied as a function and additional parameters
+phtest(popularity ~ length_sec +  danceability + acousticness + energy + instrumentalness + liveness+ loudness_sqr + speechiness+ tempo + time_signature, data = main_df_selected, method = "aux", 
+       vcov = function(x) vcovHC(x, type = "HC1"))
+
+#Based on the results shown above, we can safely reject the null hypotheses for both Hausman tests and conclude that the FE estimator is more consistent than the RE estimator.
+```
+
+Remove NA variables for 2SLS testing - 20 records
+
+```{r CAUS-DataPrep, echo=TRUE }
+main_df_selected2 <- main_df_selected %>%
+  na.omit(main_df_selected)
+```
+
+2SLS for Causality - Tempo VS Dancebility -> Popularity
+
+```{r CAUS-TEMPO-DANCE-OLS, echo=TRUE }
+#used loudness as IV
+rhs = c("length_sec" ,  "danceability" , "acousticness" , "energy" , "instrumentalness" , "liveness" , "speechiness", "time_signature")
+
+fmla.ols = reformulate(rhs, "popularity")
+
+fit.ols = lm(fmla.ols, data = main_df_selected2)
+
+summary(fit.ols)
+
+```
+
+```{r CAUS-TEMPO-DANCE-2LS, echo=TRUE, warning=FALSE}
+#testing tempo for danceability correlation
+rhs.1stage = c(rhs[-2],"tempo")
+rhs.2stage = rhs
+fmla.1stage = paste(rhs.1stage, collapse = " + ")
+fmla.2stage = paste("popularity ~ ", paste(rhs.2stage, collapse = " + "), sep = "")
+fmla.2sls = paste(fmla.2stage, fmla.1stage, sep = " | ")
+fmla.2sls = as.formula(fmla.2sls)
+
+fit.2sls = ivreg(fmla.2sls, data = main_df_selected2)
+summary(fit.2sls)
+
+```
+
+```{r coef-compare, message=FALSE, warning=FALSE}
+car::compareCoefs(fit.ols, fit.2sls)
+```
+
+### Running 2SLS with "Two Stage of OLS"
+
+The result of 2SLS should be similar that from running stage 1 and 2 with OLS, since this is how 2SLS works. The only difference is that the standard errors from "manually" running 2 stages of OLS is incorrect and we should refer to `ivreg` for the correct computation of standard errors.
+
+```{r CAUS-TEMPO-DANCE-2OLS-2SLS, echo=TRUE, warning=FALSE}
+fmla.ols1 = reformulate(rhs.1stage, "danceability")
+fit.1stage = lm(fmla.ols1, data = main_df_selected2)
+summary(fit.1stage)
+
+main_df_selected2$fitted.danceability = fit.1stage$fitted.values
+
+rhs.ols2 = c("fitted.danceability", rhs[-1])
+fmla.ols2 = reformulate(rhs.ols2, "popularity")
+
+fit.2stage = lm(fmla.ols2, data = main_df_selected2)
+summary(fit.2stage)
+
+```
+
+```{r corr-test, message=FALSE, warning=FALSE}
+cor.test(main_df_selected2$danceability, main_df_selected2$tempo, method = "spearman")
+```
+
+```{r CAUS-TEMPO-LOUD-DANCE-2LS, echo=TRUE, warning=FALSE}
+# observe that the formula for 2SLS highlights the "two stages" of OLS regression
+rhs.1stage.2iv = c(rhs[-2],"tempo", "loudness_sqr")
+fmla.1stage.2iv = paste(rhs.1stage.2iv, collapse = " + ")
+fmla.2sls = paste(fmla.2stage, fmla.1stage.2iv, sep = " | ")
+fmla.2sls.2iv = as.formula(fmla.2sls)
+# print out the formula for 2SLS
+print(fmla.2sls.2iv)
+
+# running a 2SLS with IV being `tempo`
+fit.2sls.2iv = ivreg(fmla.2sls.2iv, data = main_df_selected2)
+summary(fit.2sls.2iv)
+
+# let's inspect the how relevant `tempo` and `loudness` are in the first stage
+fmla.ols1.2iv = reformulate(rhs.1stage.2iv, "danceability")
+print(fmla.ols1.2iv)
+fit.ols1.2iv = lm(fmla.ols1.2iv, data = main_df_selected2)
+summary(fit.ols1.2iv)
+
+# we could also jointly test on `tempo = loudness = 0` using F-test (Chow-test)
+linearHypothesis(fit.ols1.2iv, c("tempo = 0", "loudness_sqr = 0"))
+```
